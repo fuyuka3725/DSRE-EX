@@ -29,9 +29,13 @@ Differences from the origin:
 
 -- The GUI from Ver 2.0 (EN) has been implemented.
 
--- There are no parameters; settings are adjusted automatically.
+-- Using ARDFTSRC as the resampler.
+
+-- There are no parameters. settings are adjusted automatically.
 
 -- It incorporates psychoacoustic technology that serves a similar purpose to DSEE HX but uses a different approach.
+
+-- Multilingual support for 4 languages.
 
 Upon reviewing the source code, it was confirmed that, like the EN version, AI was used, and the code was written to ensure that the existing code remained intact, with the exception of the GUI.
 
