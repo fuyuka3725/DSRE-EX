@@ -32,6 +32,8 @@ Differences from the origin:
 -- It incorporates psychoacoustic technology that serves a similar purpose to DSEE HX but uses a different approach.
 
 Upon reviewing the source code, it was confirmed that, like the EN version, AI was used, and the code was written to ensure that the existing code remained intact, with the exception of the GUI.
+
+
 This fork was created to maintain the discontinued Ver 3.x. You can view the changes on the release page.
 
 ---
