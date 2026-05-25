@@ -8,8 +8,8 @@ DSRE EX is a high-performance audio enhancement tool that can batch-convert any 
 
 ● DSRE
 
-It was originally developed by Chinese developer 屈乐凡 and, as is well known, began as an audio upscaler project inspired by DSEE.
-Unfortunately, however, the developer is no longer maintaining it, and it has become a defunct project.
+It was originally developed by Chinese developer Qu Le fan(屈乐凡) and, as is well known, began as an audio upscaler project inspired by DSEE.
+Unfortunately, the developer is no longer maintaining it, and it has become a dead project.
 
 
 ● Ver 2.0 (EN)
@@ -21,7 +21,7 @@ This is because the upscaling code has been completely replaced by EQ-based soun
 ● Ver 3.x (KR)
 
 https://arca.live/b/breaking/165547998
-A user known as Noir16, who is now believed to be inactive, referenced the original DSRE and EN version GUI code to create a version that was re-maintained to be closer to DSEE. the original project’s goal. And was first released on arca.live, a well-known Korean community.
+A user known as Noir16(느와르), who is now believed to be inactive, referenced the original DSRE and EN version GUI code to create a version that was re-maintained to be closer to DSEE. the original project’s goal. And was first released on arca.live, a well-known Korean community.
 
 Although this user did not use GitHub, the source code was distributed alongside the release on that community.
 
