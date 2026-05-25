@@ -1,38 +1,44 @@
-# DSRE / Deep Sound Resolution Enhancer
+# DSRE EX / Reborned DSRE (Deep Sound Resolution Enhancer)
 
-## 简介 / Description
+DSRE EX is a high-performance audio enhancement tool that can batch-convert any audio files into high-resolution (Hi-Res) audio. Inspired by Sony DSEE HX, it uses a non-deep-learning frequency enhancement algorithm, allowing fast processing of large batches without heavy computation.
 
-DSRE 是一款 **高性能音频增强工具**，可以将任何音频文件批量处理为 **高解析度（Hi-Res）音频**，无需大量计算资源即可快速处理大批量音频文件。
+## Histroy
 
-DSRE is a **high-performance audio enhancement tool** that can batch-convert any audio files into **high-resolution (Hi-Res) audio**.
-Inspired by Sony DSEE HX, it uses a **non-deep-learning frequency enhancement algorithm**, allowing fast processing of large batches without heavy computation.
+● DSRE
+It was originally developed by Chinese developer 屈乐凡 and, as is well known, began as an audio upscaler project inspired by DSEE.
+Unfortunately, however, the developer is no longer maintaining it, and it has become a defunct project.
 
-**主要特点 / Key Features:**
+● Ver 2.0 (EN)
+https://github.com/Urabewe/DSRE---Digital-Sound-Resolution-Enhancer-English
+It was known as the only forked project with modifications to the English version, but since this version has had the core upscaling logic removed by AI, it is not technically a DSRE.
+This is because the upscaling code has been completely replaced by EQ-based sound effects and plugin chains.
 
-* **批量处理 / Batch Processing**：一次性转换多个音频文件 / Convert multiple audio files at once.
-* **多格式支持 / Multiple Formats**：WAV、MP3、FLAC、M4A 等 / Supports WAV, MP3, FLAC, M4A, etc.
-* **保持封面和元数据 / Preserves Cover & Metadata**：无需手动修改 / No manual editing required.
-* **灵活参数控制 / Flexible Parameters**：调制次数、衰减幅度、高通滤波器等 / Modulation count, decay, high-pass filter, etc.
-* **快速稳定 / Fast & Stable**：不依赖深度学习模型 / Does not rely on deep learning, fast processing.
+● Ver 3.x (KR)
+https://arca.live/b/breaking/165547998
+A user known as Noir16, who is now believed to be inactive, referenced the original DSRE and EN version GUI code to create a version that was re-maintained to be closer to DSEE. the original project’s goal. And was first released on arca.live, a well-known Korean community.
+
+Although this user did not use GitHub, the source code was distributed alongside the release on that community.
+
+Differences from the origin: 
+- The GUI from Ver 2.0 (EN) has been implemented.
+- There are no parameters; settings are adjusted automatically.
+- It incorporates psychoacoustic technology that serves a similar purpose to DSEE HX but uses a different approach.
+
+Upon reviewing the source code, it was confirmed that, like the EN version, AI was used, and the code was written to ensure that the existing code remained intact, with the exception of the GUI.
+This fork was created to maintain the discontinued Ver 3.x. You can view the changes on the release page.
 
 ---
 
-## 安装与使用 / Installation & Usage
+## How do I build it?
 
-[下载 / Download](https://github.com/x1aoqv/DSRE---Digital-Sound-Resolution-Enhancer/releases/tag/v1.0.250908_beta)
+1. Install Python 3.10.11.
 
----
+2. Creating a Virtual Environment `python -m venv dsre_env`, and settings `dsre_env\Scripts\activate`
 
-## 参数说明 / Parameters
+3. Install the required package `pip install -r requirements.txt`, and upgrade pip `python -m pip install --upgrade pip`
 
-| 参数 / Parameter                               | 默认值 / Default | 说明 / Description                                                   |
-| -------------------------------------------- | ------------- | ------------------------------------------------------------------ |
-| 调制次数 (m) / Modulation count                  | 8             | 音频增强重复次数 / Number of enhancement repetitions, higher = more detail |
-| 衰减幅度 (decay)                                 | 1.25          | 高频衰减控制 / High-frequency decay control                              |
-| 预处理高通截止频率 / Pre-processing high-pass cutoff  | 3000 Hz       | 处理前高通滤波器 / Pre-enhancement high-pass filter                        |
-| 后处理高通截止频率 / Post-processing high-pass cutoff | 16000 Hz      | 处理后高通滤波器 / Post-enhancement high-pass filter                       |
-| 滤波器阶数 / Filter order                         | 11            | 高通滤波器阶数 / High-pass filter order                                   |
-| 目标采样率 / Target sampling rate                 | 96000 Hz      | 输出音频采样率 / Output audio sample rate                                 |
-| 输出格式 / Output format                         | ALAC / FLAC   | 选择 Hi-Res 输出格式 / Choose Hi-Res output format                       |
+4. Test `python DSRE.py`
+
+5. build `pyinstaller --onefile --windowed --add-data "logo.ico;." --add-binary "ffmpeg.exe;." --icon=logo.ico --name=DSRE DSRE.py`
 
 ---
