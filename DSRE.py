@@ -6,43 +6,51 @@ from typing import Optional
 import subprocess
 import soundfile as sf
 import tempfile
+import json
 
 import numpy as np
 from scipy import signal
-import librosa
-import resampy
 
 from PySide6 import QtCore, QtWidgets
-from PySide6.QtGui import QIcon, QTextCursor
+from PySide6.QtGui import QIcon, QTextCursor, QDragEnterEvent, QDropEvent, QKeySequence, QAction
 
-def add_ffmpeg_to_path():
-    if hasattr(sys, "_MEIPASS"):  # 打包后的临时目录
-        ffmpeg_dir = os.path.join(sys._MEIPASS, "ffmpeg")
+# ======== Config Dir Taget ========
+def get_config_path(filename: str) -> str:
+    if getattr(sys, 'frozen', False):
+        base = os.path.dirname(sys.executable)
     else:
-        ffmpeg_dir = os.path.join(os.path.dirname(__file__), "ffmpeg")
-    os.environ["PATH"] += os.pathsep + ffmpeg_dir
+        base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, filename)
 
-add_ffmpeg_to_path()
+# ======== Hide CLI ========
+def get_subprocess_kwargs() -> dict:
+    kwargs = {}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = 0x08000000
+    return kwargs
 
-def save_wav24_out(in_path, y_out, sr, out_path, fmt="ALAC", normalize=True):
+# ======== FFmpeg ========
+def add_ffmpeg_path(relative: str) -> str:
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, relative)
+
+add_ffmpeg_path("ffmpeg.exe")
+def cmdrun(cmd, **kw):
+    return subprocess.run(cmd,
+                          **get_subprocess_kwargs(), **kw)
+
+def save_wav24_out(in_path, y_out, sr, out_path, fmt="FLAC"):
     import tempfile, subprocess, numpy as np, soundfile as sf, os
 
-    # 确保 shape 为 (n, ch)
+    # Check shape = (n, ch)
     if y_out.ndim == 1:
         data = y_out[:, None]
     else:
         data = y_out.T if y_out.shape[0] < y_out.shape[1] else y_out
 
-    # 转为 float32 并归一化
     data = data.astype(np.float32, copy=False)
-    if normalize:
-        peak = float(np.max(np.abs(data)))
-        if peak > 1.0:
-            data /= peak
-    else:
-        data = np.clip(data, -1.0, 1.0)
+    data = np.clip(data, -1.0, 1.0)
 
-    # 临时 WAV 文件
     tmp_wav = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
     tmp_wav.close()
     sf.write(tmp_wav.name, data, sr, subtype="FLOAT")
@@ -50,30 +58,29 @@ def save_wav24_out(in_path, y_out, sr, out_path, fmt="ALAC", normalize=True):
     fmt = fmt.upper()
     out_path = os.path.splitext(out_path)[0] + (".m4a" if fmt == "ALAC" else ".flac")
 
-    codec_map = {"ALAC": "alac", "FLAC": "flac"}
-    sample_fmt_map = {"ALAC": "s32p", "FLAC": "s32"}  # 强制 24bit 整数
+    codec_map = {"FLAC": "flac", "ALAC": "alac"}
+    sample_fmt_map = {"FLAC": "s32", "ALAC": "s32p"}
 
     if fmt == "ALAC":
         cmd = [
-            "ffmpeg", "-y",
+            "ffmpeg.exe", "-y",
             "-i", tmp_wav.name,
             "-i", in_path,
-            "-map", "0:a",       # 临时 WAV 音频
-            "-map", "1:v?",      # 封面
-            "-map_metadata", "1",# 元数据
+            "-map", "0:a",
+            "-map", "1:v?",
+            "-map_metadata", "1",
             "-c:a", codec_map[fmt],
             "-sample_fmt", sample_fmt_map[fmt],
             "-c:v", "copy",
             out_path
         ]
     elif fmt == "FLAC":
-        # 提取封面图片
         cover_tmp = None
         try:
             cover_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
             cover_tmp.close()
-            subprocess.run(
-                ["ffmpeg", "-y", "-i", in_path, "-an", "-c:v", "copy", cover_tmp.name],
+            cmdrun(
+                ["ffmpeg.exe", "-y", "-i", in_path, "-an", "-c:v", "copy", cover_tmp.name],
                 check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
         except Exception:
@@ -81,14 +88,14 @@ def save_wav24_out(in_path, y_out, sr, out_path, fmt="ALAC", normalize=True):
 
         if cover_tmp and os.path.exists(cover_tmp.name):
             cmd = [
-                "ffmpeg", "-y",
-                "-i", tmp_wav.name,  # WAV 音频
-                "-i", in_path,       # 元数据来源
-                "-i", cover_tmp.name, # 封面
-                "-map", "0:a",       # 音频
-                "-map", "2:v",       # 封面
+                "ffmpeg.exe", "-y",
+                "-i", tmp_wav.name,
+                "-i", in_path,
+                "-i", cover_tmp.name,
+                "-map", "0:a",
+                "-map", "2:v",
                 "-disposition:v", "attached_pic",
-                "-map_metadata", "1",# 元数据
+                "-map_metadata", "1",
                 "-c:a", codec_map[fmt],
                 "-sample_fmt", sample_fmt_map[fmt],
                 "-c:v", "copy",
@@ -96,7 +103,7 @@ def save_wav24_out(in_path, y_out, sr, out_path, fmt="ALAC", normalize=True):
             ]
         else:
             cmd = [
-                "ffmpeg", "-y",
+                "ffmpeg.exe", "-y",
                 "-i", tmp_wav.name,
                 "-i", in_path,
                 "-map", "0:a",
@@ -106,39 +113,378 @@ def save_wav24_out(in_path, y_out, sr, out_path, fmt="ALAC", normalize=True):
                 out_path
             ]
 
-    subprocess.run(cmd, check=True)
+    cmdrun(cmd, check=True)
     os.remove(tmp_wav.name)
     if fmt == "FLAC" and cover_tmp and os.path.exists(cover_tmp.name):
         os.remove(cover_tmp.name)
 
     return out_path
 
-# ======== DSP：SSB 单边带频移 ========
+def load_audio(in_path: str):
+    import soundfile as sf
+    try:
+        y, sr = sf.read(in_path, always_2d=True)
+        return y.T.astype(np.float32), sr
+    except Exception:
+        pass
+
+    fd, tmp_wav = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    try:
+        cmdrun(
+            [add_ffmpeg_path("ffmpeg.exe"), "-y", "-i", in_path,
+             "-f", "wav", "-acodec", "pcm_f32le", tmp_wav],
+            check=True, capture_output=True,
+        )
+        y, sr = sf.read(tmp_wav, always_2d=True)
+        return y.T.astype(np.float32), sr
+    finally:
+        os.unlink(tmp_wav)
+
+# ======== DSP：SSB ========
 def freq_shift_mono(x: np.ndarray, f_shift: float, d_sr: float) -> np.ndarray:
     N_orig = len(x)
-    # pad 到 2 的幂次，便于 FFT/Hilbert 的实现效率
+    # Logic that pads up to the square of 2 to improve the efficiency of FFT/Hilbert transform implementations
     N_padded = 1 << int(np.ceil(np.log2(max(1, N_orig))))
-    S_hilbert = signal.hilbert(np.hstack((x, np.zeros(N_padded - N_orig, dtype=x.dtype))))
-    S_factor = np.exp(2j * np.pi * f_shift * d_sr * np.arange(0, N_padded))
-    return (S_hilbert * S_factor)[:N_orig].real
+    x_f32 = x.astype(np.float32)
+    padded = np.hstack((x_f32, np.zeros(N_padded - N_orig, dtype=np.float32)))
+    S_hilbert = signal.hilbert(padded).astype(np.complex64)
+    S_factor = np.exp(
+        2j * np.pi * f_shift * d_sr * np.arange(0, N_padded)
+    ).astype(np.complex64)
+    result = (S_hilbert * S_factor)[:N_orig].real
+    return result.astype(np.float32)
 
+# Automatic Hi-Pass Detection Logic
 def freq_shift_multi(x: np.ndarray, f_shift: float, d_sr: float) -> np.ndarray:
-    return np.asarray([freq_shift_mono(x[i], f_shift, d_sr) for i in range(len(x))])
+    return np.asarray(
+        [freq_shift_mono(x[i], f_shift, d_sr) for i in range(len(x))],
+        dtype=np.float32
+    )
+
+def auto_hp_params(y: np.ndarray, sr: int):
+    mono = y.mean(axis=0) if y.ndim > 1 else y
+
+    chunk = sr // 2
+    chunks = [mono[i:i+chunk] for i in range(0, len(mono)-chunk, chunk)]
+    energies = [np.mean(c**2) for c in chunks]
+    threshold_e = np.percentile(energies, 70)
+    active = [c for c, e in zip(chunks, energies) if e >= threshold_e]
+
+    active_signal = np.concatenate(active)
+    freqs = np.fft.rfftfreq(len(active_signal), 1 / sr)
+    mag = np.abs(np.fft.rfft(active_signal))
+
+    peak = mag.max()
+    threshold_high = peak * 10 ** (-40 / 20)
+
+    search_limit = int(len(freqs) * 0.95)
+    cutoff_idx = search_limit
+
+    for idx in range(search_limit, 0, -1):
+        if mag[idx] >= threshold_high:
+            cutoff_idx = idx
+            break
+
+    cutoff_hz = freqs[cutoff_idx] if cutoff_idx > 0 else sr / 2
+    post_hp = float(np.clip(cutoff_hz + 1000, 10000, 20000))
+
+    noise_floor = np.percentile(mag, 10)
+    snr_threshold = noise_floor * 10 ** (20 / 20)
+
+    stable_hz = 1000.0
+    for fq in np.arange(1000, cutoff_hz, 500):
+        idx_lo = np.searchsorted(freqs, fq)
+        idx_hi = np.searchsorted(freqs, fq + 500)
+        band_mag = mag[idx_lo:idx_hi]
+        if len(band_mag) == 0:
+            continue
+        if band_mag.mean() >= snr_threshold:
+            stable_hz = fq
+
+    min_pre_hp = max(5000, cutoff_hz * 0.3)
+    pre_hp = float(np.clip(stable_hz * 0.75, min_pre_hp, 16000))
+
+    return pre_hp, post_hp
+
+#Spectrum Roll-Off-Based Parameter Auto-Tuning
+def auto_zansei_params(y: np.ndarray, sr: int, pre_hp: float, post_hp: float):
+    mono = y.mean(axis=0) if y.ndim > 1 else y
+
+    if len(mono) < sr * 2:
+        return 7, 1.10
+
+    freqs = np.fft.rfftfreq(len(mono), 1 / sr)
+    mag = np.abs(np.fft.rfft(mono))
+
+    total_power = np.sum(mag**2) + 1e-30
+
+    noise_floor = np.percentile(mag, 20)
+    mag_clean = np.maximum(mag - noise_floor, 0)
+
+    cumsum = np.cumsum(mag_clean)
+    total_energy = cumsum[-1]
+
+    if total_energy < 1e-10:
+        return 8, 1.10
+
+    nyquist = sr / 2
+    rolloff_95 = freqs[np.searchsorted(cumsum, total_energy * 0.95)]
+    rolloff_85 = freqs[np.searchsorted(cumsum, total_energy * 0.85)]
+
+    ratio_95 = rolloff_95 / nyquist
+    ratio_85 = rolloff_85 / nyquist
+
+    #Scale-independent high-frequency band analysis
+    hf_idx_lo = np.searchsorted(freqs, nyquist * 0.65)
+    hf_idx_hi = np.searchsorted(freqs, nyquist * 0.97)
+    hf_slice = slice(hf_idx_lo, hf_idx_hi)
+    hf_mag = mag[hf_slice]
+    hf_len = len(hf_mag)
+
+    if hf_len < 8:
+        no_hf_signal = True
+        flatness = 0.0
+        slope = -18.0
+        hf_relative_energy = 0.0
+        hf_noise_ratio = 0.0
+    else:
+        mid_low_idx = np.searchsorted(freqs, nyquist * 0.50)
+        mid_low_power = np.sum(mag[:mid_low_idx]**2) + 1e-20
+        hf_power = np.sum(hf_mag**2)
+        hf_power_safe = hf_power + 1e-25
+        hf_relative_energy = hf_power_safe / mid_low_power
+
+        hf_db = 20 * np.log10(np.maximum(hf_mag, 1e-12))
+        if len(hf_db) >= 10:
+            p80 = np.percentile(hf_db, 80)
+            p20 = np.percentile(hf_db, 20)
+            flatness_proxy = (p80 - p20) / 60.0
+            flatness = np.clip(flatness_proxy, 0.0, 1.0)
+        else:
+            flatness = 0.0
+
+        x = np.linspace(0, 1, hf_len)
+        slope_per_unit = np.polyfit(x, hf_db, 1)[0]
+        freq_ratio_log = np.log2((freqs[hf_idx_hi-1] / freqs[hf_idx_lo] + 1e-8))
+        slope = slope_per_unit * freq_ratio_log if freq_ratio_log > 0 else -20.0
+
+        noise_floor_hf = np.percentile(hf_mag, 20) if hf_len > 10 else 0
+        hf_clean = np.maximum(hf_mag - noise_floor_hf, 0)
+        hf_mean_clean = float(np.mean(hf_clean))
+        hf_mean_raw = float(np.mean(hf_mag))
+        hf_noise_ratio = hf_mean_clean / (hf_mean_raw + 1e-12)
+
+        has_significant_hf = (
+            (flatness > 0.15 and slope < -1.5)
+            or (flatness > 0.25)
+            or (slope < -3.0)
+        )
+        no_hf_signal = not has_significant_hf
+
+    # Overall
+    if no_hf_signal:
+        if hf_noise_ratio < 0.1:
+            m, decay = 14, 0.65
+        elif ratio_95 > 0.5:
+            m, decay = 18, 0.75
+        else:
+            m, decay = 20, 0.80
+    elif flatness > 0.3 and slope > -2.0:
+        m, decay = 4, 0.40
+    elif flatness > 0.2 and slope > -3.0:
+        m, decay = 10, 0.55
+    elif flatness > 0.15 and slope > -4.0:
+        m, decay = 12, 0.60
+    elif flatness > 0.10:
+        m, decay = 14, 0.65
+    else:
+        m, decay = 18, 0.75
+
+    return m, decay
+
+# A-weighting Blender
+def apply_a_weighting_blend(x, d_res, sr, blend=0.15):
+    freqs = np.fft.rfftfreq(x.shape[-1], 1 / sr)
+    freqs[0] = 1e-10  # DC 성분 0 방지
+
+    # A-weighting Curve
+    f2 = freqs ** 2
+    f4 = freqs ** 4
+    aw = (12194 ** 2 * f4) / (
+        (f2 + 20.6 ** 2) *
+        np.sqrt((f2 + 107.7 ** 2) * (f2 + 737.9 ** 2)) *
+        (f2 + 12194 ** 2)
+    )
+    aw = aw / aw.max()
+
+    if d_res.ndim == 1:
+        D = np.fft.rfft(d_res)
+        D_weighted = D * aw
+        d_res_weighted = np.fft.irfft(D_weighted, n=d_res.shape[-1])
+    else:
+        d_res_weighted = np.zeros_like(d_res)
+        for ch in range(d_res.shape[0]):
+            D = np.fft.rfft(d_res[ch])
+            D_weighted = D * aw
+            d_res_weighted[ch] = np.fft.irfft(D_weighted, n=d_res.shape[-1])
+
+    adp_power = float(np.mean(np.abs(d_res_weighted)))
+    src_power = float(np.mean(np.abs(x)))
+
+    if adp_power < 1e-10:
+        return x
+
+    adj_factor = (src_power / adp_power) * blend
+    adj_factor = min(adj_factor, 2.0)
+
+    return x + d_res_weighted * adj_factor
+
+#Spectral Subtraction Denoise
+def spectral_denoise(y: np.ndarray, sr: int, strength: float = 0.5, protect_hz: float = 200.0) -> np.ndarray:
+
+    is_1d = y.ndim == 1
+    if is_1d:
+        y = y[np.newaxis, :]
+
+    result = np.zeros_like(y)
+
+    for ch in range(y.shape[0]):
+        x = y[ch]
+        # Estimating the noise floor on a chunk-by-chunk basis
+        chunk_size = sr // 4
+        chunks = [x[i:i+chunk_size]
+                  for i in range(0, len(x)-chunk_size, chunk_size)]
+
+        # Use the quietest section as the noise profile
+        energies = [np.mean(c**2) for c in chunks]
+        noise_idx = np.argmin(energies)
+        noise_chunk = chunks[noise_idx]
+
+        # Noise Spectrum Estimation
+        noise_mag = np.abs(np.fft.rfft(
+            np.pad(noise_chunk, (0, len(x) - len(noise_chunk)))))
+
+        D = np.fft.rfft(x)
+        mag = np.abs(D)
+        phase = np.angle(D)
+
+        snr = mag / (noise_mag * strength + 1e-12)
+        gain = snr / (snr + 1.0)
+        gain = np.maximum(gain, 0.1)
+
+        freqs = np.fft.rfftfreq(len(x), 1 / sr)
+        protect_idx = np.searchsorted(freqs, protect_hz)
+        gain[:protect_idx] = 1.0
+
+        D_clean = gain * mag * np.exp(1j * phase)
+        result[ch] = np.fft.irfft(D_clean, n=len(x)).astype(np.float32)
+
+    return result[0] if is_1d else result
+
+#Transient Sharp
+def transient_sharpening(y: np.ndarray, sr: int, strength: float = 0.3) -> np.ndarray:
+    if y.ndim == 1:
+        y = y[np.newaxis, :]
+
+    result = np.zeros_like(y)
+
+    for ch in range(y.shape[0]):
+        x = y[ch]
+        n = len(x)
+
+        frame_size = int(sr * 0.01)
+
+        energy = np.array([
+            np.mean(x[i:i+frame_size]**2)
+            for i in range(0, len(x)-frame_size, frame_size)
+        ])
+
+        energy_diff = np.diff(energy, prepend=energy[0])
+        transient = np.maximum(energy_diff, 0)
+
+        transient_samples = np.interp(
+            np.arange(n),
+            np.linspace(0, n, len(transient)),
+            transient
+        )
+
+        gain = 1.0 + strength * transient_samples / (
+            np.max(transient_samples) + 1e-12)
+
+        result[ch] = (x * gain).astype(np.float32)
+
+    return result[0] if y.shape[0] == 1 else result
+
+#Bark
+def critical_band_enhance(y: np.ndarray, sr: int,
+                           strength: float = 0.2) -> np.ndarray:
+    bark_bands = [
+        (200, 300), (300, 400), (400, 510),
+        (510, 630), (630, 770), (770, 920),
+        (920, 1080), (1080, 1270), (1270, 1480),
+        (1480, 1720), (1720, 2000), (2000, 2320),
+        (2320, 2700), (2700, 3150), (3150, 3700),
+        (3700, 4400), (4400, 5300), (5300, 6400),
+    ]
+
+    if y.ndim == 1:
+        y = y[np.newaxis, :]
+
+    result = np.zeros_like(y)
+
+    for ch in range(y.shape[0]):
+        x = y[ch]
+        freqs = np.fft.rfftfreq(len(x), 1 / sr)
+        D = np.fft.rfft(x)
+        mag = np.abs(D)
+        phase = np.angle(D)
+
+        band_energies = []
+        for lo, hi in bark_bands:
+            idx_lo = np.searchsorted(freqs, lo)
+            idx_hi = np.searchsorted(freqs, hi)
+            band_energies.append(
+                float(np.mean(mag[idx_lo:idx_hi]**2) + 1e-12))
+
+        gain = np.ones_like(mag)
+        for i, (lo, hi) in enumerate(bark_bands):
+            idx_lo = np.searchsorted(freqs, lo)
+            idx_hi = np.searchsorted(freqs, hi)
+
+            neighbors = band_energies[max(0,i-1):i] + \
+                       band_energies[i+1:min(len(band_energies),i+2)]
+            if neighbors:
+                neighbor_mean = np.mean(neighbors)
+                contrast = band_energies[i] / (neighbor_mean + 1e-12)
+
+                band_gain = 1.0 + strength * np.log1p(contrast) * 0.3
+                gain[idx_lo:idx_hi] = band_gain
+
+        D_enhanced = gain * mag * np.exp(1j * phase)
+        result[ch] = np.fft.irfft(
+            D_enhanced, n=len(x)).astype(np.float32)
+
+    return result[0] if y.shape[0] == 1 else result
 
 def zansei_impl(
     x: np.ndarray,
     sr: int,
-    m: int = 8,
-    decay: float = 1.25,
-    pre_hp: float = 3000.0,
-    post_hp: float = 16000.0,
-    filter_order: int = 11,
+    m: int = 0,
+    decay: float = 0.00,
     progress_cb=None,
-    abort_cb=None,  # 新增回调
+    abort_cb=None,
 ) -> np.ndarray:
-    # 预处理高通
-    b, a = signal.butter(filter_order, pre_hp / (sr / 2), 'highpass')
-    d_src = signal.filtfilt(b, a, x)
+
+    pre_hp, post_hp = auto_hp_params(x, sr)
+
+    if m == 0 or decay == 0.00:
+        m, decay = auto_zansei_params(x, sr, pre_hp, post_hp)
+
+    # Pre-processing HPF & Denoise
+    x_clean = spectral_denoise(x, sr, strength=0.4, protect_hz=200.0)
+    sos = signal.butter(9, pre_hp / (sr / 2), 'highpass', output='sos')
+    d_src = signal.sosfiltfilt(sos, x_clean)
 
     d_sr = 1.0 / sr
     f_dn = freq_shift_mono if (x.ndim == 1) else freq_shift_multi
@@ -146,32 +492,393 @@ def zansei_impl(
 
     for i in range(m):
         if abort_cb and abort_cb():
-            break  # 立即退出处理
+            break
         shift_hz = sr * (i + 1) / (m * 2.0)
         d_res += f_dn(d_src, shift_hz, d_sr) * np.exp(-(i + 1) * decay)
         if progress_cb:
             progress_cb(i + 1, m)
 
-    # 后处理高通
-    b, a = signal.butter(filter_order, post_hp / (sr / 2), 'highpass')
-    d_res = signal.filtfilt(b, a, d_res)
+    # Post-processing HPF
+    sos = signal.butter(8, post_hp / (sr / 2), 'highpass', output='sos')
+    d_res = signal.sosfiltfilt(sos, d_res)
 
     adp_power = float(np.mean(np.abs(d_res)))
     src_power = float(np.mean(np.abs(x)))
-    adj_factor = src_power / (adp_power + src_power + 1e-12)
 
-    y = (x + d_res) * adj_factor
+    if adp_power < 1e-10:
+        return x
+
+    sos_hf = signal.butter(4, post_hp / (sr / 2), 'highpass', output='sos')
+    x_hf = signal.sosfiltfilt(sos_hf, x)
+    src_hf_power = float(np.mean(np.abs(x_hf)))
+    src_hf_power = max(src_hf_power, src_power * 0.01)
+
+    adj_factor = (src_power / adp_power) * 0.10
+    adj_factor = min(adj_factor, 1.0)
+
+    # A-weighting
+    freqs = np.fft.rfftfreq(x.shape[-1], 1 / sr)
+    freqs[0] = 1e-10
+
+    f2 = freqs ** 2
+    f4 = freqs ** 4
+    aw = (12194 ** 2 * f4) / (
+        (f2 + 20.6 ** 2) *
+        np.sqrt((f2 + 107.7 ** 2) * (f2 + 737.9 ** 2)) *
+        (f2 + 12194 ** 2)
+    )
+    aw = aw / aw.max()
+
+    suppress_mask = np.ones_like(aw)
+    mid_idx_lo = np.searchsorted(freqs, 2000)
+    mid_idx_hi = np.searchsorted(freqs, 8000)
+    suppress_mask[mid_idx_lo:mid_idx_hi] = aw[mid_idx_lo:mid_idx_hi]
+
+    if d_res.ndim == 1:
+        D = np.fft.rfft(d_res)
+        d_res_masked = np.fft.irfft(D * suppress_mask, n=d_res.shape[-1])
+    else:
+        d_res_masked = np.zeros_like(d_res)
+        for ch in range(d_res.shape[0]):
+            D = np.fft.rfft(d_res[ch])
+            d_res_masked[ch] = np.fft.irfft(
+                D * suppress_mask, n=d_res.shape[-1])
+
+    y = x + d_res_masked * adj_factor
+
+    y = transient_sharpening(y, sr, strength=0.2)
+    y = critical_band_enhance(y, sr, strength=0.1)
+
     return y
 
-# ======== 后台工作线程 ========
+# ======== Resampler : ARDFTSRC ========
+def resample_ardftsrc(
+    y: np.ndarray,
+    sr_in: int,
+    sr_out: int,
+    bit_depth: int = 32,
+    quality: int = 8192,
+    bandwidth: float = 0.999,
+) -> np.ndarray:
+
+    import scipy.fft as fft
+    import math
+
+    if sr_in == sr_out:
+        return y
+
+    is_1d = y.ndim == 1
+    if is_1d:
+        y = y[np.newaxis, :]
+
+    x = y.T
+
+    gcd = math.gcd(sr_in, sr_out)
+    in_nb_samples = sr_in // gcd
+    out_nb_samples = sr_out // gcd
+
+    min_samples = max(in_nb_samples, out_nb_samples)
+    target_chunk_size = max(quality, sr_in // 4)
+    scale_up = max(
+        math.ceil(quality / min_samples),
+        math.ceil(target_chunk_size / min_samples)
+    )
+    in_nb_samples *= scale_up
+    out_nb_samples *= scale_up
+
+    if in_nb_samples % 2 != 0:
+        in_nb_samples += 1
+    if out_nb_samples % 2 != 0:
+        out_nb_samples += 1
+
+    in_rdft_size = in_nb_samples * 2
+    out_rdft_size = out_nb_samples * 2
+
+    taper_size = in_rdft_size // 2 + 1
+
+    in_offset = (in_rdft_size - in_nb_samples) // 2
+    tr_nb_samples = min(in_nb_samples, out_nb_samples)
+    taper_samples = round(math.ceil(tr_nb_samples * (1.0 - bandwidth)))
+    scale = out_nb_samples / in_nb_samples
+
+    size = x.shape[0]
+    pad_size = size % in_nb_samples
+    if pad_size > 0:
+        pad_size = in_nb_samples - pad_size
+        x = np.pad(x, ((0, pad_size), (0, 0)), 'constant')
+
+    num_chunks = x.shape[0] // in_nb_samples
+
+    # C++ sigmoid taper Modulation
+    taper = np.zeros(taper_size, dtype=complex)
+    for idx in range(taper_size):
+        if idx < tr_nb_samples - taper_samples:
+            taper[idx] = 1.0
+        elif idx < tr_nb_samples - 1:
+            n = float(idx - (tr_nb_samples - taper_samples))
+            t = float(taper_samples)
+            zbk = t / ((t - n) - 1.0) - t / (n + 1.0)
+            v = 1.0 / (math.exp(zbk) + 1.0)
+            taper[idx] = v
+        else:
+            taper[idx] = 0.0
+
+    prev_chunk = np.zeros((out_nb_samples, x.shape[1]))
+
+    fd, tmp_path = tempfile.mkstemp(suffix=".bin")
+    os.close(fd)
+
+    try:
+        chunks_written = 0
+        with open(tmp_path, 'wb') as f:
+            for i in range(num_chunks):
+                x_chunk = x[i * in_nb_samples:(i + 1) * in_nb_samples].astype(np.float64)
+
+                chunk = np.pad(x_chunk,
+                    ((in_offset, in_offset), (0, 0)), 'constant')
+                chunk = fft.rfft(chunk, n=in_rdft_size, axis=0)
+                chunk = chunk * taper[:, np.newaxis]
+
+                if out_rdft_size >= in_rdft_size:
+                    chunk = np.pad(chunk,
+                        ((0, out_rdft_size - in_rdft_size), (0, 0)),
+                        'constant')
+                else:
+                    chunk = chunk[:out_rdft_size // 2 + 1]
+
+                chunk = fft.irfft(chunk, n=out_rdft_size, axis=0)
+
+                current_chunk = chunk[:out_nb_samples] + prev_chunk
+                current_chunk *= scale
+
+                if i > 0:
+                    f.write(current_chunk.astype(np.float64).tobytes())
+                    chunks_written += 1
+
+                prev_chunk = chunk[out_nb_samples:]
+
+        total_samples = chunks_written * out_nb_samples
+        with open(tmp_path, 'rb') as f:
+            result = np.frombuffer(
+                f.read(),
+                dtype=np.float64
+            ).reshape(total_samples, x.shape[1])
+
+    finally:
+        os.unlink(tmp_path)
+
+    y_out = result.T.astype(np.float32)
+    return y_out[0] if is_1d else y_out
+
+# ======== 언어 스트링스 ========
+STRINGS = {
+    "ko": {
+        "title":        "DSRE EX",
+        "input_files":  "음원 파일 목록",
+        "add_files":    "음원 파일 추가",
+        "clear_files":  "전체 항목 제거",
+        "remove_sel":   "선택 항목 제거",
+        "output_dir":   "출력 경로",
+        "select_dir":   "출력 경로 선택",
+        "convert":      "변환",
+        "start":        "변환 시작",
+        "cancel":       "변환 취소",
+        "retry":        "실패한 파일 재시도",
+        "params":       "출력 설정",
+        "m_label":      "변조값:",
+        "decay_label":  "감쇠율:",
+        "sr_label":     "목표 샘플링 레이트:",
+        "fmt_label":    "출력 인코딩 형식:",
+        "file_prog":    "현재 파일 처리 진행률",
+        "all_prog":     "전체 파일 처리 진행률",
+        "log":          "로그",
+        "ready":        "준비완료",
+        "light_mode":   "라이트 모드",
+        "dark_mode":    "다크 모드",
+        "about":        "정보",
+        "file_menu":    "파일(&F)",
+        "process_menu": "처리(&P)",
+        "help_menu":    "도움말(&H)",
+        "output_placeholder": "지정 폴더",
+        "lang_label":        "언어:",
+        "recent_files":      "최근 파일(&R)",
+        "exit":              "종료(&X)",
+        "no_recent":         "최근 파일 없음",
+        "file_not_found":    "파일 없음",
+        "file_not_found_msg": "파일을 찾을 수 없습니다",
+        "convert_error":     "변환 오류",
+        "no_files_warning":  "변환할 파일을 한 개 이상 선택해주세요.",
+        "processing":        "작업 처리 중…",
+        "preparing":     "{n}개의 파일을 변환할 준비 중",
+        "retrying":          "재시도 중",
+        "cancelling":        "변환 취소 중",
+        "finished":          "변환이 완료되었습니다.",
+        "done":              "완료",
+        "error":             "오류",
+        "log_loading": "불러오는 중: {path}",
+        "log_saved":   "변환 완료: {path}",
+        "log_author":        "원작자: 屈乐凡(Qu Le Fan)",
+        "log_report":        "리포트: Le_Fan_Qv@outlook.com",
+        "log_contact":       "연락처: 323861356 (QQ)",
+        "log_localizer":     "현지화 및 개조: 느와르(Noir16)",
+    },
+    "en": {
+        "title":        "DSRE EX",
+        "input_files":  "Audio Files List",
+        "add_files":    "Add Files",
+        "clear_files":  "Clear List",
+        "remove_sel":   "Remove Selected",
+        "output_dir":   "Output Directory",
+        "select_dir":   "Select Output Directory",
+        "convert":      "Convert",
+        "start":        "Start",
+        "cancel":       "Cancel",
+        "retry":        "Retrying Failed Files",
+        "params":       "Output Settings",
+        "m_label":      "Modulation Count:",
+        "decay_label":  "Decay:",
+        "sr_label":     "Target Sample Rate:",
+        "fmt_label":    "Output Format:",
+        "file_prog":    "Current File Progress",
+        "all_prog":     "Overall Progress",
+        "log":          "Log",
+        "ready":        "Ready",
+        "light_mode":   "Light Mode",
+        "dark_mode":    "Dark Mode",
+        "about":        "About",
+        "output_placeholder": "Select Folder",
+        "lang_label":        "Language:",
+        "file_menu":         "File(&F)",
+        "process_menu":      "Process(&P)",
+        "help_menu":         "Help(&H)",
+        "recent_files":      "Recent Files(&R)",
+        "exit":              "Exit(&X)",
+        "no_recent":         "No recent files",
+        "file_not_found":    "File not found",
+        "file_not_found_msg": "File cannot be found.",
+        "convert_error":     "Conversion error",
+        "no_files_warning":  "Please select 1 or more files to convert.",
+        "processing":        "Processing",
+        "preparing":   "Preparing {n} files",
+        "retrying":          "Retrying",
+        "cancelling":        "Conversion Canceling",
+        "finished":          "The conversion is complete.",
+        "done":              "Complete",
+        "error":             "Error",
+        "log_loading": "Loading…: {path}",
+        "log_saved":   "Conversion Completed: {path}",
+        "log_author":        "Original Author: 屈乐凡(Qu Le Fan)",
+        "log_report":        "Report: Le_Fan_Qv@outlook.com",
+        "log_contact":       "Contact: 323861356 (QQ)",
+        "log_localizer":     "Localization and Modification: Noir16",
+    },
+    "zh": {
+        "title":        "DSRE EX",
+        "input_files":  "歌曲列表",
+        "add_files":    "添加输入文件",
+        "clear_files":  "清空输入列表",
+        "remove_sel":   "清空输入所选",
+        "output_dir":   "输出路径",
+        "select_dir":   "选择输出目录",
+        "convert":      "转换",
+        "start":        "开始转换",
+        "cancel":       "取消转换",
+        "retry":        "重试失败文件",
+        "params":       "输出设置",
+        "sr_label":     "目标采样率:",
+        "fmt_label":    "输出编码格式:",
+        "file_prog":    "当前文件进度",
+        "all_prog":     "整体进度",
+        "log":          "日志",
+        "ready":        "准备就绪",
+        "light_mode":   "浅色模式",
+        "dark_mode":    "深色模式",
+        "about":        "关于",
+        "file_menu":    "文件(&F)",
+        "process_menu": "处理(&P)",
+        "help_menu":    "帮助(&H)",
+        "output_placeholder": "指定文件夹",
+        "lang_label":        "语言:",
+        "recent_files":      "最近文件(&R)",
+        "exit":              "退出(&X)",
+        "no_recent":         "最近没有文件",
+        "file_not_found":    "无文件",
+        "file_not_found_msg": "找不到该文件。",
+        "convert_error":     "没有文件",
+        "no_files_warning":  "请选择一个或多个要转换的文件。",
+        "processing":        "正在处理中",
+        "preparing":     "转换准备转换{n}个文件",
+        "retrying":          "转换重试",
+        "cancelling":        "转换撤销转换",
+        "finished":          "转换已完成。",
+        "done":              "完成",
+        "error":             "错误",
+        "log_loading": "正在加载: {path}",
+        "log_saved":   "转换完成: {path}",
+        "log_author":        "原作者: 屈乐凡(Qu Le Fan)",
+        "log_report":        "报告: Le_Fan_Qv@outlook.com",
+        "log_contact":       "联系: 323861356 (QQ)",
+        "log_localizer":     "本地化与修改: Noir16",
+    },
+    "ja": {
+        "title":        "DSRE EX",
+        "input_files":  "楽曲一覧",
+        "add_files":    "ファイル追加",
+        "clear_files":  "リストをクリア",
+        "remove_sel":   "選択項目を削除",
+        "output_dir":   "出力パス",
+        "select_dir":   "出力パスを選択",
+        "convert":      "変換",
+        "start":        "変換開始",
+        "cancel":       "変換キャンセル",
+        "retry":        "失敗ファイルを再試行",
+        "params":       "出力設定",
+        "sr_label":     "目標サンプリングレート:",
+        "fmt_label":    "出力エンコード形式:",
+        "file_prog":    "現在のファイル進捗",
+        "all_prog":     "全体進捗",
+        "log":          "ログ",
+        "ready":        "準備完了",
+        "light_mode":   "ライトモード",
+        "dark_mode":    "ダークモード",
+        "about":        "情報",
+        "file_menu":    "ファイル(&F)",
+        "process_menu": "処理(&P)",
+        "help_menu":    "ヘルプ(&H)",
+        "output_placeholder": "指定フォルダ",
+        "lang_label":        "言語:",
+        "recent_files":      "最近のファイル(&R)",
+        "exit":              "終了(&X)",
+        "no_recent":         "最近のファイルなし",
+        "file_not_found":    "ファイルなし",
+        "file_not_found_msg": "ファイルが見つかりませんでした。",
+        "convert_error":     "変換エラー",
+        "no_files_warning":  "変換するファイルを1個以上選択してください。",
+        "processing":        "プロセス処理中",
+        "preparing":     "{n}個のファイルを変換する準備中",
+        "retrying":          "再試行中",
+        "cancelling":        "変換キャンセル中",
+        "finished":          "変換が完了いたしました。",
+        "done":              "完了",
+        "error":             "エラー",
+        "log_loading": "読み込み中: {path}",
+        "log_saved":   "変換完了: {path}",
+        "log_author":        "原作者: 屈乐凡(Qu Le Fan)",
+        "log_report":        "レポート: Le_Fan_Qv@outlook.com",
+        "log_contact":       "連絡先: 323861356 (QQ)",
+        "log_localizer":     "現地化と改造: ノワール(Noir16)",
+    },
+}
+
+# ======== 백그라운드 작업 스레드 ========
 class DSREWorker(QtCore.QThread):
-    sig_log = QtCore.Signal(str)                         # 文本日志
-    sig_file_progress = QtCore.Signal(int, int, str)     # 当前文件进度 (cur, total, filename)
-    sig_step_progress = QtCore.Signal(int, str)          # 单文件内部进度(0~100), 文件名
-    sig_overall_progress = QtCore.Signal(int, int)       # 总体进度 (done, total)
-    sig_file_done = QtCore.Signal(str, str)              # 单文件完成 (in_path, out_path)
-    sig_error = QtCore.Signal(str, str)                  # 错误 (filename, err_msg)
-    sig_finished = QtCore.Signal()                       # 全部完成
+    sig_log = QtCore.Signal(str)                         # 로그
+    sig_file_progress = QtCore.Signal(int, int, str)     # 현재 파일 진행 상황 (cur, total, filename)
+    sig_step_progress = QtCore.Signal(int, str)          # 현재 파일 진행률 (0~100), 파일 이름
+    sig_overall_progress = QtCore.Signal(int, int)       # 현재 파일 진행 상황 (done, total)
+    sig_file_done = QtCore.Signal(str, str)              # 현재 파일 변환 완료 (in_path, out_path)
+    sig_error = QtCore.Signal(str, str)                  # 오류 (filename, err_msg)
+    sig_finished = QtCore.Signal()                       # 전체 파일 변환 완료
 
     def __init__(self, files, output_dir, params, parent=None):
         super().__init__(parent)
@@ -182,6 +889,11 @@ class DSREWorker(QtCore.QThread):
 
     def abort(self):
         self._abort = True
+
+    def tr(self, key: str) -> str:
+        """워커용 번역 함수"""
+        lang = self.params.get('lang', 'ko')
+        return STRINGS.get(lang, STRINGS["ko"]).get(key, key)
 
     def run(self):
         total = len(self.files)
@@ -197,37 +909,36 @@ class DSREWorker(QtCore.QThread):
             self.sig_step_progress.emit(0, fname)
 
             try:
-                # 读取
-                self.sig_log.emit(f"正在加载：{in_path}")
-                y, sr = librosa.load(in_path, mono=False, sr=None)
+                # 로드
+                self.sig_log.emit(self.tr("log_loading").format(path=in_path))
+                y, sr = load_audio(in_path)
 
-                # 对齐为 (ch, n)
+                # 정렬기준 (ch, n)
                 if y.ndim == 1:
                     y = y[np.newaxis, :]
-                # 重采样
+                # 리샘플링
                 target_sr = int(self.params["target_sr"])
-                if sr != target_sr:
-                    self.sig_log.emit(f"正在进行：{fname}: {sr} -> {target_sr}")
-                    y = resampy.resample(y, sr, target_sr, filter='kaiser_fast')
-                    sr = target_sr
+                is_upsample = target_sr > sr
+                y = resample_ardftsrc(
+                    y, sr, target_sr,
+                        bit_depth=32,
+                        quality=8192 if is_upsample else 4096,
+                        bandwidth=0.999  if is_upsample else 0.970,
+                    )
+                sr = target_sr
 
-                # 处理
+                # 처리
                 def step_cb(cur, m):
                     pct = int(cur * 100 / max(1, m))
                     self.sig_step_progress.emit(pct, fname)
 
                 y_out = zansei_impl(
                     y, sr,
-                    m=int(self.params["m"]),
-                    decay=float(self.params["decay"]),
-                    pre_hp=float(self.params["pre_hp"]),
-                    post_hp=float(self.params["post_hp"]),
-                    filter_order=int(self.params["filter_order"]),
                     progress_cb=step_cb,
-                    abort_cb=lambda: self._abort  # 传入取消回调
+                    abort_cb=lambda: self._abort  # 패스스루 취소 콜백
                 )
 
-                # 保存（保持原格式 + 元数据）
+                # 저장 (원본 형식 및 메타데이터 유지)
                 os.makedirs(self.output_dir, exist_ok=True)
                 base, ext = os.path.splitext(fname)
 
@@ -235,13 +946,14 @@ class DSREWorker(QtCore.QThread):
                                         f"{base}.{self.params['format'].lower() if self.params['format'] == 'flac' else 'm4a'}")
                 out_path = save_wav24_out(in_path, y_out, sr, out_path, fmt=self.params['format'])
 
-                self.sig_log.emit(f"文件已保存：{out_path}")
+                self.sig_log.emit(self.tr("log_saved").format(path=out_path))
                 self.sig_file_done.emit(in_path, out_path)
 
             except Exception as e:
                 err = "".join(traceback.format_exception_only(type(e), e)).strip()
                 self.sig_error.emit(fname, err)
-                self.sig_log.emit(f"[错误] {fname}: {err}")
+                self.sig_log.emit(
+                    f"[{self.tr('error')}] {fname}: {err}")
 
             done += 1
             self.sig_overall_progress.emit(done, total)
@@ -250,175 +962,582 @@ class DSREWorker(QtCore.QThread):
         self.sig_finished.emit()
 
 # ======== GUI ========
-class MainWindow(QtWidgets.QWidget):
+class DragDropListWidget(QtWidgets.QListWidget):   #DragDrop 위젯 
+    """드래그 앤 드롭을 지원하는 파일 목록 위젯"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.setDragDropMode(
+            QtWidgets.QAbstractItemView.DragDropMode.DropOnly)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                file_path = url.toLocalFile()
+                if file_path and (
+                    self.findItems(
+                        file_path, QtCore.Qt.MatchFlag.MatchExactly) == []):
+                    self.addItem(file_path)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("DSRE v1.1.250908_beta")
 
-        # 获取相对路径的图标
+        # 상태 초기화
+        self.lang = "ko"
+        self.dark_mode = True
+        self.recent_files = []
+        self.max_recent_files = 10
+        self.failed_files = []
+
+        # 기본 설정
+        self.setWindowTitle(self.tr("title"))
         icon_path = os.path.join(os.path.dirname(__file__), "logo.ico")
         self.setWindowIcon(QIcon(icon_path))
+        self.resize(1024, 640)
 
-        self.resize(900, 600)
+        # 중앙 위젯
+        self.central_widget = QtWidgets.QWidget()
+        self.setCentralWidget(self.central_widget)
 
-        # 文件列表
-        self.list_files = QtWidgets.QListWidget()
-        self.btn_add = QtWidgets.QPushButton("添加输入文件")
-        self.btn_clear = QtWidgets.QPushButton("清空输入列表")
-        self.btn_outdir = QtWidgets.QPushButton("选择输出目录")
-        self.le_outdir = QtWidgets.QLineEdit()
-        self.le_outdir.setPlaceholderText("Output folder")
+        # 위젯 생성
+        self.list_files = DragDropListWidget()
+        self.list_files.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
+        self.list_files.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+
+        self.btn_add             = QtWidgets.QPushButton(self.tr("add_files"))
+        self.btn_clear           = QtWidgets.QPushButton(self.tr("clear_files"))
+        self.btn_remove_selected = QtWidgets.QPushButton(self.tr("remove_sel"))
+        self.btn_outdir          = QtWidgets.QPushButton(self.tr("select_dir"))
+        self.le_outdir           = QtWidgets.QLineEdit()
+        self.le_outdir.setPlaceholderText(self.tr("output_placeholder"))
         self.le_outdir.setText(os.path.abspath("output"))
 
-        # 参数
-        self.sb_m = QtWidgets.QSpinBox()
-        self.sb_m.setRange(1, 1024)
-        self.sb_m.setValue(8)
-        self.dsb_decay = QtWidgets.QDoubleSpinBox()
-        self.dsb_decay.setRange(0.0, 1024)
-        self.dsb_decay.setSingleStep(0.05)
-        self.dsb_decay.setValue(1.25)
-        self.sb_pre = QtWidgets.QSpinBox()
-        self.sb_pre.setRange(1, 384000)
-        self.sb_pre.setValue(3000)
-        self.sb_post = QtWidgets.QSpinBox()
-        self.sb_post.setRange(1, 384000)
-        self.sb_post.setValue(16000)
-        self.sb_order = QtWidgets.QSpinBox()
-        self.sb_order.setRange(1, 1000)
-        self.sb_order.setValue(11)
-        self.sb_sr = QtWidgets.QSpinBox()
-        self.sb_sr.setRange(1, 384000)
-        self.sb_sr.setSingleStep(1000)
-        self.sb_sr.setValue(96000)
+        self.cb_sr = QtWidgets.QComboBox()
+        for sr_val in [44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000]:
+            self.cb_sr.addItem(f"{sr_val // 1000} KHz  ({sr_val} Hz)", userData=sr_val)
+        self.cb_sr.setCurrentIndex(3)
 
-        # 进度
-        self.pb_file = QtWidgets.QProgressBar()    # 单文件进度
-        self.pb_all = QtWidgets.QProgressBar()     # 全部进度
-        self.lbl_now = QtWidgets.QLabel("控制")
+        self.pb_file = QtWidgets.QProgressBar()
+        self.pb_all  = QtWidgets.QProgressBar()
+        self.lbl_now = QtWidgets.QLabel(self.tr("convert"))
 
-        # 控制按钮
-        self.btn_start = QtWidgets.QPushButton("开始处理")
-        self.btn_cancel = QtWidgets.QPushButton("取消处理")
+        self.lbl_stats = QtWidgets.QLabel(self.tr("ready"))
+        self.lbl_stats.setStyleSheet("QLabel { font-size: 11px; }")
+        self.lbl_eta = QtWidgets.QLabel("")
+        self.lbl_eta.setStyleSheet("QLabel { font-size: 11px; }")
+
+        self.btn_start  = QtWidgets.QPushButton(self.tr("start"))
+        self.btn_cancel = QtWidgets.QPushButton(self.tr("cancel"))
         self.btn_cancel.setEnabled(False)
+        self.btn_retry  = QtWidgets.QPushButton(self.tr("retry"))
+        self.btn_retry.setEnabled(False)
+        self.btn_retry.setStyleSheet(
+            "QPushButton { background-color: #ff9800; color: white; }")
 
-        # 日志
+        self.btn_dark = QtWidgets.QPushButton(self.tr("light_mode"))
+        self.btn_dark.clicked.connect(self.toggle_dark_mode)
+
+        self.cb_format = QtWidgets.QComboBox()
+        self.cb_format.addItems(["FLAC", "ALAC"])
+
+        self.cb_lang = QtWidgets.QComboBox()
+        self.cb_lang.addItem("한국어", userData="ko")
+        self.cb_lang.addItem("日本語", userData="ja")
+        self.cb_lang.addItem("English", userData="en")
+        self.cb_lang.addItem("中文", userData="zh")
+
         self.te_log = QtWidgets.QTextEdit()
         self.te_log.setReadOnly(True)
 
-        # ===== 布局 =====
-        grid = QtWidgets.QGridLayout()
+        # 레이아웃
+        main_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
 
-        # === 左列：输入文件 ===
-        vleft = QtWidgets.QVBoxLayout()
-        lbl_files = QtWidgets.QLabel("输入文件")
-        lbl_files.setAlignment(QtCore.Qt.AlignHCenter)
-        vleft.addWidget(lbl_files)
-        vleft.addWidget(self.list_files)
-        grid.addLayout(vleft, 0, 0, 7, 1)
+        # 좌측: 파일 목록
+        left_widget = QtWidgets.QWidget()
+        left_layout = QtWidgets.QVBoxLayout()
+        self.lbl_files = QtWidgets.QLabel(self.tr("input_files"))
+        self.lbl_files.setAlignment(QtCore.Qt.AlignHCenter)
+        left_layout.addWidget(self.lbl_files)
+        left_layout.addWidget(self.list_files)
+        left_widget.setLayout(left_layout)
+        main_splitter.addWidget(left_widget)
 
-        # === 中列：操作 ===
-        vmid = QtWidgets.QVBoxLayout()
-        lbl_ops = QtWidgets.QLabel("操作")
-        lbl_ops.setAlignment(QtCore.Qt.AlignHCenter)
-        vmid.addWidget(lbl_ops)
+        # 중앙: 변환 조작
+        middle_widget = QtWidgets.QWidget()
+        middle_widget.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Maximum)
+        middle_layout = QtWidgets.QVBoxLayout()
+        middle_layout.setAlignment(QtCore.Qt.AlignTop)
+        self.lbl_ops = QtWidgets.QLabel(self.tr("convert"))
+        self.lbl_ops.setAlignment(QtCore.Qt.AlignHCenter)
+        middle_layout.addWidget(self.lbl_ops)
 
         vbtn = QtWidgets.QVBoxLayout()
+        vbtn.setAlignment(QtCore.Qt.AlignTop)
         vbtn.addWidget(self.btn_add)
         vbtn.addWidget(self.btn_clear)
+        vbtn.addWidget(self.btn_remove_selected)
         vbtn.addSpacing(10)
-        vbtn.addWidget(QtWidgets.QLabel("输出目录"))
+        self.lbl_outdir = QtWidgets.QLabel(self.tr("output_dir"))
+        vbtn.addWidget(self.lbl_outdir)
         vbtn.addWidget(self.le_outdir)
         vbtn.addWidget(self.btn_outdir)
         vbtn.addSpacing(20)
-
-        # 把 lbl_now ("控制") 放在这里
         vbtn.addWidget(self.lbl_now)
-
         vbtn.addWidget(self.btn_start)
         vbtn.addWidget(self.btn_cancel)
-        vbtn.addStretch(1)
+        vbtn.addWidget(self.btn_retry)
+        vbtn.addWidget(self.btn_dark)
+        middle_layout.addLayout(vbtn)
+        middle_layout.addStretch(1)
+        middle_widget.setLayout(middle_layout)
+        main_splitter.addWidget(middle_widget)
 
-        # 输出格式选择
-        self.cb_format = QtWidgets.QComboBox()
-        self.cb_format.addItems(["ALAC", "FLAC"])  # 两种可选格式
-        vbtn.addWidget(QtWidgets.QLabel("输出编码格式"))
-        vbtn.addWidget(self.cb_format)
-
-        vmid.addLayout(vbtn)
-        grid.addLayout(vmid, 0, 1, 7, 1)
-
-        # === 右列：参数设置 + 进度 ===
-        vright = QtWidgets.QVBoxLayout()
-        lbl_params = QtWidgets.QLabel("参数设置")
-        lbl_params.setAlignment(QtCore.Qt.AlignHCenter)
-        vright.addWidget(lbl_params)
+        # 우측: 파라미터 + 진행바
+        right_widget = QtWidgets.QWidget()
+        right_layout = QtWidgets.QVBoxLayout()
+        self.lbl_params = QtWidgets.QLabel(self.tr("params"))
+        self.lbl_params.setAlignment(QtCore.Qt.AlignHCenter)
+        right_layout.addWidget(self.lbl_params)
 
         form = QtWidgets.QFormLayout()
-        form.addRow("调制次数:", self.sb_m)
-        form.addRow("衰减幅度:", self.dsb_decay)
-        form.addRow("预处理高通滤波器截止频率（Hz）:", self.sb_pre)
-        form.addRow("后处理高通滤波器截止频率（Hz）:", self.sb_post)
-        form.addRow("滤波器阶数:", self.sb_order)
-        form.addRow("目标采样率（Hz）:", self.sb_sr)
-        vright.addLayout(form)
-
-        vright.addSpacing(20)
+        self.lbl_sr    = QtWidgets.QLabel(self.tr("sr_label"))
+        self.lbl_fmt   = QtWidgets.QLabel(self.tr("fmt_label"))
+        form.addRow(self.lbl_sr,    self.cb_sr)
+        form.addRow(self.lbl_fmt,   self.cb_format)
+        right_layout.addLayout(form)
+        right_layout.addSpacing(20)
 
         vprog = QtWidgets.QVBoxLayout()
-        vprog.addWidget(QtWidgets.QLabel("当前文件处理进度"))
+        self.lbl_file_prog = QtWidgets.QLabel(self.tr("file_prog"))
+        self.lbl_all_prog  = QtWidgets.QLabel(self.tr("all_prog"))
+        vprog.addWidget(self.lbl_file_prog)
         vprog.addWidget(self.pb_file)
-        vprog.addWidget(QtWidgets.QLabel("全部文件处理进度"))
+        vprog.addWidget(self.lbl_all_prog)
         vprog.addWidget(self.pb_all)
+        vprog.addWidget(self.lbl_stats)
+        vprog.addWidget(self.lbl_eta)
+        vprog.addSpacing(10)
+
+        # 언어 선택 (진행바 아래)
+        lang_layout = QtWidgets.QHBoxLayout()
+        self.lbl_lang = QtWidgets.QLabel(self.tr("lang_label"))
+        lang_layout.addWidget(self.lbl_lang)
+        lang_layout.addWidget(self.cb_lang)
+        vprog.addLayout(lang_layout)
         vprog.addStretch(1)
-        vright.addLayout(vprog)
-        grid.addLayout(vright, 0, 2, 7, 1)
 
-        # === 底部日志 ===
-        grid.addWidget(QtWidgets.QLabel("日志"), 7, 0)
-        grid.addWidget(self.te_log, 8, 0, 1, 3)
+        right_layout.addLayout(vprog)
+        right_widget.setLayout(right_layout)
+        main_splitter.addWidget(right_widget)
 
-        self.setLayout(grid)
+        main_splitter.setSizes([300, 300, 400])
 
-        # 连接信号
+        # 수직 스플리터
+        vertical_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        vertical_splitter.addWidget(main_splitter)
+
+        log_widget = QtWidgets.QWidget()
+        log_layout = QtWidgets.QVBoxLayout()
+        self.lbl_log = QtWidgets.QLabel(self.tr("log"))
+        log_layout.addWidget(self.lbl_log)
+        log_layout.addWidget(self.te_log)
+        log_widget.setLayout(log_layout)
+        vertical_splitter.addWidget(log_widget)
+        vertical_splitter.setSizes([600, 200])
+
+        main_layout = QtWidgets.QVBoxLayout()
+        main_layout.addWidget(vertical_splitter)
+        self.central_widget.setLayout(main_layout)
+
+        # 시그널 연결
         self.btn_add.clicked.connect(self.on_add_files)
-        self.btn_clear.clicked.connect(self.list_files.clear)
+        self.btn_clear.clicked.connect(self.on_clear_files)
+        self.btn_remove_selected.clicked.connect(self.on_remove_selected)
         self.btn_outdir.clicked.connect(self.on_choose_outdir)
         self.btn_start.clicked.connect(self.on_start)
         self.btn_cancel.clicked.connect(self.on_cancel)
+        self.btn_retry.clicked.connect(self.on_retry_failed)
+        self.list_files.itemSelectionChanged.connect(self.update_button_states)
+        self.cb_lang.currentIndexChanged.connect(self._on_lang_changed)
 
         self.worker: Optional[DSREWorker] = None
+        self.config_file = get_config_path("DSRE.json")
 
-        # 初始化完成后写入欢迎信息
-        self.append_log("软件制作：屈乐凡")
-        self.append_log("问题反馈：Le_Fan_Qv@outlook.com")
-        self.append_log("交流群组：323861356（QQ）")
+        # 설정 불러오기
+        self.load_config()
+
+        # 파라미터 변경 시 자동 저장
+        self.cb_sr.currentIndexChanged.connect(self.save_config)
+        self.le_outdir.textChanged.connect(self.save_config)
+        self.cb_format.currentTextChanged.connect(self.save_config)
+
+        # 메뉴바 / 상태바
+        self.create_menu_bar()
+        self.statusBar().showMessage(self.tr("ready"))
+
+        self.update_recent_files_menu()
+
+        # 초기화 완료 후 언어 적용
+        self.retranslate_ui()
+
+        # 테마 / 환영 메시지
+        self.apply_theme()
+
+        self.append_log(self.tr("log_author"))
+        self.append_log(self.tr("log_report"))
+        self.append_log(self.tr("log_contact"))
+        self.append_log("----------------------------------------------")
+        self.append_log(self.tr("log_localizer"))
+
+    def tr(self, key: str) -> str:
+        """현재 언어에 맞는 문자열 반환"""
+        return STRINGS.get(self.lang, STRINGS["ko"]).get(key, key)
+
+    def retranslate_ui(self):
+        """언어 변경 시 UI 텍스트 업데이트"""
+        self.setWindowTitle(self.tr("title"))
+        self.lbl_files.setText(self.tr("input_files"))
+        self.lbl_ops.setText(self.tr("convert"))
+        self.lbl_outdir.setText(self.tr("output_dir"))
+        self.btn_add.setText(self.tr("add_files"))
+        self.btn_clear.setText(self.tr("clear_files"))
+        self.btn_remove_selected.setText(self.tr("remove_sel"))
+        self.btn_outdir.setText(self.tr("select_dir"))
+        self.btn_start.setText(self.tr("start"))
+        self.btn_cancel.setText(self.tr("cancel"))
+        self.btn_retry.setText(self.tr("retry"))
+        self.lbl_now.setText(self.tr("convert"))
+        self.lbl_stats.setText(self.tr("ready"))
+        self.btn_dark.setText(
+            self.tr("light_mode") if self.dark_mode else self.tr("dark_mode"))
+        self.lbl_params.setText(self.tr("params"))
+        self.lbl_sr.setText(self.tr("sr_label"))
+        self.lbl_fmt.setText(self.tr("fmt_label"))
+        self.lbl_lang.setText(self.tr("lang_label"))
+        self.lbl_file_prog.setText(self.tr("file_prog"))
+        self.lbl_all_prog.setText(self.tr("all_prog"))
+        self.lbl_log.setText(self.tr("log"))
+
+    def _on_lang_changed(self):
+        """언어 변경 콜백"""
+        self.lang = self.cb_lang.currentData()
+        self.retranslate_ui()
+        self.menuBar().clear()
+        self.create_menu_bar()
+        self.update_recent_files_menu()
+        self.statusBar().showMessage(self.tr("ready"))
+        self.save_config()
+
+    def create_menu_bar(self):
+        menubar = self.menuBar()
+
+        file_menu = menubar.addMenu(self.tr("file_menu"))
+
+        add_action = QAction(self.tr("add_files"), self)
+        add_action.setShortcut(QKeySequence.StandardKey.Open)
+        add_action.triggered.connect(self.on_add_files)
+        file_menu.addAction(add_action)
+
+        clear_action = QAction(self.tr("clear_files"), self)
+        clear_action.setShortcut('Ctrl+L')
+        clear_action.triggered.connect(self.on_clear_files)
+        file_menu.addAction(clear_action)
+
+        file_menu.addSeparator()
+
+        self.recent_menu = file_menu.addMenu(self.tr("recent_files"))
+
+        file_menu.addSeparator()
+
+        exit_action = QAction(self.tr("exit"), self)
+        exit_action.setShortcut(QKeySequence.StandardKey.Quit)
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+
+        process_menu = menubar.addMenu(self.tr("process_menu"))
+
+        start_action = QAction(self.tr("start"), self)
+        start_action.setShortcut('F5')
+        start_action.triggered.connect(self.on_start)
+        process_menu.addAction(start_action)
+
+        cancel_action = QAction(self.tr("cancel"), self)
+        cancel_action.setShortcut('Escape')
+        cancel_action.triggered.connect(self.on_cancel)
+        process_menu.addAction(cancel_action)
+
+        retry_action = QAction(self.tr("retry"), self)
+        retry_action.setShortcut('Ctrl+R')
+        retry_action.triggered.connect(self.on_retry_failed)
+        process_menu.addAction(retry_action)
+
+        help_menu = menubar.addMenu(self.tr("help_menu"))
+        about_action = QAction(self.tr("about"), self)
+        about_action.triggered.connect(self.show_about)
+        help_menu.addAction(about_action)
+
+    def toggle_dark_mode(self):
+        self.dark_mode = not self.dark_mode
+        self.apply_theme()
+        self.save_config()
+        self.btn_dark.setText(
+            self.tr("light_mode") if self.dark_mode else self.tr("dark_mode"))
+
+    def apply_theme(self):
+        if self.dark_mode:
+            self.setStyleSheet("""
+                QMainWindow, QWidget {
+                    background-color: #2b2b2b; color: #ffffff; }
+                QListWidget {
+                    background-color: #3c3c3c; color: #ffffff;
+                    border: 2px dashed #666666; border-radius: 5px; }
+                QListWidget::item {
+                    padding: 5px; border-bottom: 1px solid #555555; }
+                QListWidget::item:hover { background-color: #4a4a4a; }
+                QListWidget::item:selected {
+                    background-color: #0078d4; color: white; }
+                QPushButton {
+                    background-color: #404040; color: #ffffff;
+                    border: 1px solid #666666; padding: 5px;
+                    border-radius: 3px; }
+                QPushButton:hover { background-color: #505050; }
+                QPushButton:pressed { background-color: #606060; }
+                QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
+                    background-color: #3c3c3c; color: #ffffff;
+                    border: 1px solid #666666; padding: 5px; }
+                QProgressBar {
+                    background-color: #3c3c3c;
+                    border: 1px solid #666666; text-align: center; }
+                QProgressBar::chunk { background-color: #0078d4; }
+                QTextEdit {
+                    background-color: #3c3c3c; color: #ffffff;
+                    border: 1px solid #666666; }
+                QMenuBar {
+                    background-color: #2b2b2b; color: #ffffff;
+                    border-bottom: 1px solid #666666; }
+                QMenuBar::item {
+                    background-color: transparent; padding: 4px 8px; }
+                QMenuBar::item:selected { background-color: #404040; }
+                QMenu {
+                    background-color: #3c3c3c; color: #ffffff;
+                    border: 1px solid #666666; }
+                QMenu::item { padding: 4px 20px; }
+                QMenu::item:selected { background-color: #404040; }
+                QStatusBar {
+                    background-color: #2b2b2b; color: #ffffff;
+                    border-top: 1px solid #666666; }
+                QSplitter::handle { background-color: #666666; }
+            """)
+        else:
+            self.setStyleSheet("""
+                QMainWindow, QWidget {
+                    background-color: #ffffff; color: #333333; }
+                QListWidget {
+                    border: 2px dashed #aaa; border-radius: 5px;
+                    background-color: #f9f9f9; }
+                QListWidget::item {
+                    padding: 5px; border-bottom: 1px solid #eee; }
+                QListWidget::item:hover { background-color: #e3f2fd; }
+                QListWidget::item:selected {
+                    background-color: #2196f3; color: white; }
+                QPushButton {
+                    background-color: #f0f0f0; color: #333333;
+                    border: 1px solid #cccccc; padding: 5px;
+                    border-radius: 3px; }
+                QPushButton:hover { background-color: #e0e0e0; }
+                QPushButton:pressed { background-color: #d0d0d0; }
+                QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
+                    background-color: #ffffff; color: #333333;
+                    border: 1px solid #cccccc; padding: 5px; }
+                QProgressBar {
+                    background-color: #f0f0f0;
+                    border: 1px solid #cccccc; text-align: center; }
+                QProgressBar::chunk { background-color: #2196f3; }
+                QTextEdit {
+                    background-color: #ffffff; color: #333333;
+                    border: 1px solid #cccccc; }
+                QMenuBar {
+                    background-color: #f0f0f0; color: #333333;
+                    border-bottom: 1px solid #cccccc; }
+                QMenuBar::item {
+                    background-color: transparent; padding: 4px 8px; }
+                QMenuBar::item:selected { background-color: #e0e0e0; }
+                QMenu {
+                    background-color: #ffffff; color: #333333;
+                    border: 1px solid #cccccc; }
+                QMenu::item { padding: 4px 20px; }
+                QMenu::item:selected { background-color: #e0e0e0; }
+                QStatusBar {
+                    background-color: #f0f0f0; color: #333333;
+                    border-top: 1px solid #cccccc; }
+                QSplitter::handle { background-color: #cccccc; }
+            """)
+
+    def show_about(self):
+        QtWidgets.QMessageBox.about(self, self.tr("about"),
+            "DSRE EX\n\n"
+            "ヒルベルト変換基礎SSB周波数シフト技術\n"
+            "オーディオアップスケーラー\n\n"
+            "ARDFTSRC 高品質リサンプリング処理\n"
+            "完全自動パラメータ調整技術対応\n\n"
+            "原作者: 屈乐凡(Qu Le Fan)\n"
+            "レポート: Le_Fan_Qv@outlook.com\n"
+            "連絡先: 323861356 (QQ)\n\n"
+            "現地化と改造: ノワール(Noir16)")
 
     def on_add_files(self):
         filters = (
-            "Audio Files (*.wav *.mp3 *.m4a *.flac *.ogg *.aiff *.aif *.aac *.wma *.mka);;"
+            "Audio Files (*.wav *.mp3 *.m4a *.flac *.ogg *.aiff *.aif *.aac *.wma *.mka *.opus);;"
             "All Files (*.*)"
         )
-        files, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "选择的输入文件", "", filters)
+        files, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self, self.tr("add_files"), "", filters)
         for f in files:
-            if f and (self.list_files.findItems(f, QtCore.Qt.MatchFlag.MatchExactly) == []):
+            if f and (self.list_files.findItems(
+                    f, QtCore.Qt.MatchFlag.MatchExactly) == []):
                 self.list_files.addItem(f)
+                self.add_to_recent_files(f)
+        self.update_button_states()
+
+    def on_clear_files(self):
+        self.list_files.clear()
+        self.lbl_stats.setText(self.tr("ready"))
+        self.lbl_eta.setText("")
+        self.pb_all.setValue(0)
+        self.pb_file.setValue(0)
+        self.update_button_states()
+
+    def on_remove_selected(self):
+        for item in reversed(self.list_files.selectedItems()):
+            self.list_files.takeItem(self.list_files.row(item))
+        self.update_button_states()
+
+    def update_button_states(self):
+        self.btn_remove_selected.setEnabled(
+            len(self.list_files.selectedItems()) > 0)
+        self.btn_retry.setEnabled(len(self.failed_files) > 0)
 
     def on_choose_outdir(self):
-        d = QtWidgets.QFileDialog.getExistingDirectory(self, "选择的输出目录", self.le_outdir.text() or "")
+        d = QtWidgets.QFileDialog.getExistingDirectory(
+            self, self.tr("select_dir"), self.le_outdir.text() or "")
         if d:
             self.le_outdir.setText(d)
 
+    def load_config(self):
+        # 설정 불러오는 동안 모든 시그널 차단
+        for widget in [self.cb_sr, self.le_outdir, self.cb_format, self.cb_lang]:
+            widget.blockSignals(True)
+        try:
+            if os.path.exists(self.config_file):
+                if os.path.getsize(self.config_file) == 0:
+                    return
+                with open(self.config_file, 'r') as f:
+                    config = json.load(f)
+                target_sr = config.get('target_sr', 96000)
+                for i in range(self.cb_sr.count()):
+                    if self.cb_sr.itemData(i) == target_sr:
+                        self.cb_sr.setCurrentIndex(i)
+                        break
+                self.le_outdir.setText(
+                    config.get('output_dir', os.path.abspath("output")))
+                fmt_map = {'FLAC': 0, 'ALAC': 1}
+                self.cb_format.setCurrentIndex(
+                    fmt_map.get(config.get('format', 'FLAC'), 0))
+                self.recent_files = config.get('recent_files', [])
+                self.dark_mode = config.get('dark_mode', True)
+                self.btn_dark.setText(
+                    self.tr("light_mode") if self.dark_mode
+                    else self.tr("dark_mode"))
+
+                # 언어 불러오기
+                saved_lang = config.get('lang', 'ko')
+                self.lang = saved_lang
+                for i in range(self.cb_lang.count()):
+                    if self.cb_lang.itemData(i) == saved_lang:
+                        self.cb_lang.setCurrentIndex(i)
+                        break
+
+        except Exception as e:
+            self.append_log(f"設定の保存に失敗: {e}")
+
+        finally:
+            for widget in [self.cb_sr, self.le_outdir, self.cb_format, self.cb_lang]:
+                widget.blockSignals(False)
+
+    def save_config(self):
+        try:
+            config = {
+                'target_sr':    self.cb_sr.currentData(),
+                'output_dir':   self.le_outdir.text(),
+                'format':       self.cb_format.currentText(),
+                'recent_files': self.recent_files,
+                'dark_mode':    self.dark_mode,
+                'lang':         self.lang,
+            }
+            with open(self.config_file, 'w') as f:
+                json.dump(config, f, indent=2)
+        except Exception as e:
+            self.append_log(f"設定の保存に失敗: {e}")
+
+    def add_to_recent_files(self, file_path: str):
+        if file_path in self.recent_files:
+            self.recent_files.remove(file_path)
+        self.recent_files.insert(0, file_path)
+        if len(self.recent_files) > self.max_recent_files:
+            self.recent_files = self.recent_files[:self.max_recent_files]
+        self.update_recent_files_menu()
+
+    def update_recent_files_menu(self):
+        self.recent_menu.clear()
+        if not self.recent_files:
+            action = QAction(self.tr("no_recent"), self)
+            action.setEnabled(False)
+            self.recent_menu.addAction(action)
+        else:
+            for fp in self.recent_files:
+                action = QAction(os.path.basename(fp), self)
+                action.triggered.connect(
+                    lambda checked, path=fp: self.load_recent_file(path))
+                self.recent_menu.addAction(action)
+
+    def load_recent_file(self, file_path: str):
+        if os.path.exists(file_path):
+            if not self.list_files.findItems(
+                    file_path, QtCore.Qt.MatchFlag.MatchExactly):
+                self.list_files.addItem(file_path)
+        else:
+            if file_path in self.recent_files:
+                self.recent_files.remove(file_path)
+                self.update_recent_files_menu()
+            QtWidgets.QMessageBox.warning(
+                self, self.tr("file_not_found"),
+                f"{self.tr('file_not_found_msg')}: {file_path}")
+
     def params(self):
         return dict(
-            m=self.sb_m.value(),
-            decay=self.dsb_decay.value(),
-            pre_hp=self.sb_pre.value(),
-            post_hp=self.sb_post.value(),
-            target_sr=self.sb_sr.value(),
-            filter_order=self.sb_order.value(),
-            bit_depth=24,  # 固定输出 24bit
-            format=self.cb_format.currentText()  # ALAC 或 FLAC
+            target_sr=self.cb_sr.currentData(),
+            bit_depth=24,
+            format=self.cb_format.currentText(),
+            lang=self.lang,
         )
 
     def append_log(self, s: str):
@@ -426,23 +1545,27 @@ class MainWindow(QtWidgets.QWidget):
         self.te_log.moveCursor(QTextCursor.End)
 
     def on_start(self):
-        files = [self.list_files.item(i).text() for i in range(self.list_files.count())]
+        files = [self.list_files.item(i).text()
+                 for i in range(self.list_files.count())]
         if not files:
-            QtWidgets.QMessageBox.warning(self, "没有文件", "请至少添加一个输入文件")
+            QtWidgets.QMessageBox.warning(
+                self, self.tr("convert_error"),
+                self.tr("no_files_warning"))
             return
         outdir = self.le_outdir.text().strip() or os.path.abspath("output")
 
-        # 置零进度
         self.pb_all.setValue(0)
         self.pb_file.setValue(0)
-        self.lbl_now.setText("正在初始化…")
-        self.append_log(f"开始处理 {len(files)} 个文件…")
+        self.lbl_now.setText(self.tr("processing"))
+        self.lbl_stats.setText(
+            self.tr("preparing").format(n=len(files)))
+        self.append_log(
+            self.tr("preparing").format(n=len(files)))
 
-        # 锁定按钮
+        self.failed_files.clear()
         self.btn_start.setEnabled(False)
         self.btn_cancel.setEnabled(True)
 
-        # 启动后台线程
         self.worker = DSREWorker(files, outdir, self.params())
         self.worker.sig_log.connect(self.append_log)
         self.worker.sig_file_progress.connect(self.on_file_progress)
@@ -455,7 +1578,7 @@ class MainWindow(QtWidgets.QWidget):
 
     @QtCore.Slot(int, int, str)
     def on_file_progress(self, cur, total, fname):
-        self.lbl_now.setText(f"正在处理… [{cur}/{total}]: {fname}")
+        self.lbl_now.setText(f"[{cur}/{total}] {fname}")
         self.pb_file.setValue(0)
 
     @QtCore.Slot(int, str)
@@ -466,42 +1589,79 @@ class MainWindow(QtWidgets.QWidget):
     def on_overall_progress(self, done, total):
         pct = int(done * 100 / max(1, total))
         self.pb_all.setValue(pct)
+        self.lbl_stats.setText(f"{done}/{total}")
 
     @QtCore.Slot(str, str)
     def on_file_done(self, in_path, out_path):
-        self.append_log(f"处理完成: {os.path.basename(in_path)} -> {out_path}")
+        self.append_log(
+            f"{self.tr('log_saved').format(path=os.path.basename(in_path))} -> {out_path}")
 
     @QtCore.Slot(str, str)
     def on_error(self, fname, err):
-        self.append_log(f"[错误] {fname}: {err}")
+        self.append_log(f"[{self.tr('log_error')}] {fname}: {err}")
+        self.failed_files.append(fname)
+        self.btn_retry.setEnabled(True)
+
+    def on_retry_failed(self):
+        if not self.failed_files:
+            return
+        self.append_log(
+            self.tr("log_retrying").format(n=len(self.failed_files)))
+        self.pb_all.setValue(0)
+        self.pb_file.setValue(0)
+        self.lbl_now.setText(self.tr("retrying"))
+        self.btn_start.setEnabled(False)
+        self.btn_cancel.setEnabled(True)
+        self.btn_retry.setEnabled(False)
+
+        outdir = self.le_outdir.text().strip() or os.path.abspath("output")
+        self.worker = DSREWorker(self.failed_files, outdir, self.params())
+        self.worker.sig_log.connect(self.append_log)
+        self.worker.sig_file_progress.connect(self.on_file_progress)
+        self.worker.sig_step_progress.connect(self.on_step_progress)
+        self.worker.sig_overall_progress.connect(self.on_overall_progress)
+        self.worker.sig_file_done.connect(self.on_file_done)
+        self.worker.sig_error.connect(self.on_error)
+        self.worker.sig_finished.connect(self.on_finished)
+        self.worker.start()
 
     def on_cancel(self):
         if self.worker and self.worker.isRunning():
-            self.append_log("正在取消…")
+            self.append_log(self.tr("cancelling"))
             self.worker.abort()
 
     def on_finished(self):
-        self.append_log("所有文件均已完成处理")
-        self.lbl_now.setText("控制")
+        self.append_log(self.tr("finished"))
+        self.lbl_now.setText(self.tr("convert"))
+        self.lbl_stats.setText(self.tr("done"))
         self.btn_start.setEnabled(True)
         self.btn_cancel.setEnabled(False)
+        self.btn_retry.setEnabled(len(self.failed_files) > 0)
         self.worker = None
 
-def main():
+    def format_time(self, seconds):
+        if seconds < 60:
+            return f"{seconds:.0f}sec"
+        elif seconds < 3600:
+            return f"{seconds/60:.0f}min {seconds%60:.0f}sec"
+        else:
+            return f"{int(seconds//3600)}h {int((seconds%3600)//60)}min"
 
+
+def main():
     import ctypes
-    myappid = "com.lefanqv.dsre"  # 你自定义的应用 ID，必须是字符串
+    myappid = "org.noir.dsre"
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 
     app = QtWidgets.QApplication(sys.argv)
 
-    # 全局设置应用图标
     icon_path = os.path.join(os.path.dirname(__file__), "logo.ico")
     app.setWindowIcon(QIcon(icon_path))
 
     w = MainWindow()
     w.show()
     sys.exit(app.exec())
+
 
 if __name__ == "__main__":
     main()
