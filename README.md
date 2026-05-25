@@ -38,8 +38,6 @@ Upon reviewing the source code, it was confirmed that, like the EN version, AI w
 
 This fork was created to maintain the discontinued Ver 3.x. You can view the changes on the release page.
 
----
-
 ## How do I build it?
 
 1. Install Python 3.10.11.
@@ -52,4 +50,8 @@ This fork was created to maintain the discontinued Ver 3.x. You can view the cha
 
 5. build `pyinstaller --onefile --windowed --add-data "logo.ico;." --add-binary "ffmpeg.exe;." --icon=logo.ico --name=DSRE DSRE.py`
 
----
+## Credits
+- DSRE: https://github.com/x1aoqv/DSRE---Digital-Sound-Resolution-Enhancer
+- DSRE-GUI: https://github.com/Urabewe/DSRE---Digital-Sound-Resolution-Enhancer-English
+- ARDFTSRC: https://github.com/mrspoonsi/ARDFTSRC
+- FFmpeg: https://ffmpeg.org/
