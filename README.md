@@ -52,7 +52,7 @@ This fork was created to maintain the discontinued Ver 3.x. You can view the cha
 
 ## TODO
 
-- [ ] Changing the resampling process to a post-processing step, resolve issues related to metallic noise and algorithm references.
+- [ ] Fix the automatic parameter calculation formula so that it does not reference the resampling space.
 - [ ] Imports a multi-platform GUI from [CrossDarkrix/DSRE-Audio-Enhancer](https://github.com/CrossDarkrix/DSRE-Audio-Enhancer).
 
 ## Credits
