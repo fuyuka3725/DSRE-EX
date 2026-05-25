@@ -52,6 +52,7 @@ This fork was created to maintain the discontinued Ver 3.x. You can view the cha
 
 ## Credits
 - DSRE: https://github.com/x1aoqv/DSRE---Digital-Sound-Resolution-Enhancer
-- DSRE-GUI: https://github.com/Urabewe/DSRE---Digital-Sound-Resolution-Enhancer-English
+- DSRE-English (Forked-GUI): https://github.com/Urabewe/DSRE---Digital-Sound-Resolution-Enhancer-English
+- DSRE-v3.5 (Forked-Rebase): https://arca.live/b/breaking/165547998
 - ARDFTSRC: https://github.com/mrspoonsi/ARDFTSRC
 - FFmpeg: https://ffmpeg.org/
