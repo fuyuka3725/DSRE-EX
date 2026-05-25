@@ -48,6 +48,8 @@ This fork was created to maintain the discontinued Ver 3.x. You can view the cha
 
 4. Test `python DSRE.py`
 
+※ To start and build this, you will need ffmpeg.exe.
+
 5. build `pyinstaller --onefile --windowed --add-data "logo.ico;." --add-binary "ffmpeg.exe;." --icon=logo.ico --name=DSRE DSRE.py`
 
 ## TODO
@@ -61,3 +63,7 @@ This fork was created to maintain the discontinued Ver 3.x. You can view the cha
 - DSRE-v3.5 (Forked-Rebase): https://arca.live/b/breaking/165547998
 - ARDFTSRC: https://github.com/mrspoonsi/ARDFTSRC
 - FFmpeg: https://ffmpeg.org/
+
+SOME PART OF THIS SOURCE CODE WERE GENERATED USING AI (X.com Grok & Anthropic Claude).
+THIS IMPLIES THAT AI CODE GENERATORS WAS USED, BUT IT DOES NOT MEAN THAT
+THE PROGRAM ITSELF OPERATES USING AI
