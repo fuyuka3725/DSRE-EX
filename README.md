@@ -50,6 +50,11 @@ This fork was created to maintain the discontinued Ver 3.x. You can view the cha
 
 5. build `pyinstaller --onefile --windowed --add-data "logo.ico;." --add-binary "ffmpeg.exe;." --icon=logo.ico --name=DSRE DSRE.py`
 
+## TODO
+
+- [ ] Changing the resampling process to a post-processing step, resolve issues related to metallic noise and algorithm references.
+- [ ] Imports a multi-platform GUI from [CrossDarkrix/DSRE-Audio-Enhancer](https://github.com/CrossDarkrix/DSRE-Audio-Enhancer).
+
 ## Credits
 - DSRE: https://github.com/x1aoqv/DSRE---Digital-Sound-Resolution-Enhancer
 - DSRE-English (Forked-GUI): https://github.com/Urabewe/DSRE---Digital-Sound-Resolution-Enhancer-English
