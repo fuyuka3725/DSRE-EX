@@ -58,8 +58,9 @@ This fork was created to maintain the discontinued Ver 3.x. You can view the cha
 
 ## TODO
 
-- [ ] Fix the automatic parameter calculation formula so that it does not reference the resampling space.
-- [ ] Imports a multi-platform GUI from [CrossDarkrix/DSRE-Audio-Enhancer](https://github.com/CrossDarkrix/DSRE-Audio-Enhancer).
+- [x] Fix the automatic parameter calculation formula so that it does not reference the resampling space.
+- [ ] Fix the issue where sound quality was degraded in certain frequency bands.
+- [ ] Imports a MacOS GUI from [CrossDarkrix/DSRE-Audio-Enhancer](https://github.com/CrossDarkrix/DSRE-Audio-Enhancer).
 
 ## Credits
 - DSRE: https://github.com/x1aoqv/DSRE---Digital-Sound-Resolution-Enhancer
