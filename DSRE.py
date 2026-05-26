@@ -472,14 +472,16 @@ def zansei_impl(
     sr: int,
     m: int = 0,
     decay: float = 0.00,
+    src_sr: Optional[int] = None,
     progress_cb=None,
     abort_cb=None,
 ) -> np.ndarray:
+    analysis_sr = src_sr if src_sr is not None else sr
 
-    pre_hp, post_hp = auto_hp_params(x, sr)
+    pre_hp, post_hp = auto_hp_params(x, analysis_sr)
 
     if m == 0 or decay == 0.00:
-        m, decay = auto_zansei_params(x, sr, pre_hp, post_hp)
+        m, decay = auto_zansei_params(x, analysis_sr, pre_hp, post_hp)
 
     # Pre-processing HPF & Denoise
     x_clean = spectral_denoise(x, sr, strength=0.4, protect_hz=200.0)
@@ -909,14 +911,14 @@ class DSREWorker(QtCore.QThread):
             self.sig_step_progress.emit(0, fname)
 
             try:
-                # 로드
+                # Load
                 self.sig_log.emit(self.tr("log_loading").format(path=in_path))
                 y, sr = load_audio(in_path)
 
-                # 정렬기준 (ch, n)
+                # Sort by (ch, n)
                 if y.ndim == 1:
                     y = y[np.newaxis, :]
-                # 리샘플링
+                # Resample
                 target_sr = int(self.params["target_sr"])
                 is_upsample = target_sr > sr
                 y = resample_ardftsrc(
@@ -925,9 +927,10 @@ class DSREWorker(QtCore.QThread):
                         quality=8192 if is_upsample else 4096,
                         bandwidth=0.999  if is_upsample else 0.970,
                     )
+                sr_original = sr
                 sr = target_sr
 
-                # 처리
+                # Processing
                 def step_cb(cur, m):
                     pct = int(cur * 100 / max(1, m))
                     self.sig_step_progress.emit(pct, fname)
@@ -935,10 +938,11 @@ class DSREWorker(QtCore.QThread):
                 y_out = zansei_impl(
                     y, sr,
                     progress_cb=step_cb,
-                    abort_cb=lambda: self._abort  # 패스스루 취소 콜백
+                    abort_cb=lambda: self._abort,
+                    src_sr=sr_original,
                 )
 
-                # 저장 (원본 형식 및 메타데이터 유지)
+                # Save
                 os.makedirs(self.output_dir, exist_ok=True)
                 base, ext = os.path.splitext(fname)
 
