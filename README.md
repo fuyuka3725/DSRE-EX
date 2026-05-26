@@ -1,4 +1,4 @@
-# DSRE EX / Reborned DSRE (Deep Sound Resolution Enhancer)
+# DSRE EX / Reborned Deep Sound Resolution Enhancer
 
 <img width="640" height="380" alt="img" src="https://github.com/user-attachments/assets/eda2aabf-e756-4da5-9d0b-8e52f6133b12" />
 
