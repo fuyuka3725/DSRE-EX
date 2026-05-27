@@ -306,7 +306,7 @@ def auto_zansei_params(y: np.ndarray, sr: int, pre_hp: float, post_hp: float):
 # A-weighting Blender
 def apply_a_weighting_blend(x, d_res, sr, blend=0.15):
     freqs = np.fft.rfftfreq(x.shape[-1], 1 / sr)
-    freqs[0] = 1e-10  # DC 성분 0 방지
+    freqs[0] = 1e-10
 
     # A-weighting Curve
     f2 = freqs ** 2
@@ -476,6 +476,7 @@ def zansei_impl(
     progress_cb=None,
     abort_cb=None,
 ) -> np.ndarray:
+
     analysis_sr = src_sr if src_sr is not None else sr
 
     pre_hp, post_hp = auto_hp_params(x, analysis_sr)
@@ -515,8 +516,11 @@ def zansei_impl(
     src_hf_power = float(np.mean(np.abs(x_hf)))
     src_hf_power = max(src_hf_power, src_power * 0.01)
 
-    adj_factor = (src_power / adp_power) * 0.10
-    adj_factor = min(adj_factor, 1.0)
+    hf_ratio = src_hf_power / (src_power + 1e-12)
+    hf_scale = float(np.clip(hf_ratio * 20.0, 0.05, 1.0))
+
+    adj_factor = (src_power / adp_power) * 0.10 * hf_scale
+    adj_factor = min(adj_factor, 0.5)
 
     # A-weighting
     freqs = np.fft.rfftfreq(x.shape[-1], 1 / sr)
@@ -872,15 +876,15 @@ STRINGS = {
     },
 }
 
-# ======== 백그라운드 작업 스레드 ========
+# ======== Background Work Thread ========
 class DSREWorker(QtCore.QThread):
-    sig_log = QtCore.Signal(str)                         # 로그
-    sig_file_progress = QtCore.Signal(int, int, str)     # 현재 파일 진행 상황 (cur, total, filename)
-    sig_step_progress = QtCore.Signal(int, str)          # 현재 파일 진행률 (0~100), 파일 이름
-    sig_overall_progress = QtCore.Signal(int, int)       # 현재 파일 진행 상황 (done, total)
-    sig_file_done = QtCore.Signal(str, str)              # 현재 파일 변환 완료 (in_path, out_path)
-    sig_error = QtCore.Signal(str, str)                  # 오류 (filename, err_msg)
-    sig_finished = QtCore.Signal()                       # 전체 파일 변환 완료
+    sig_log = QtCore.Signal(str)                         # log
+    sig_file_progress = QtCore.Signal(int, int, str)     # current, total, filename
+    sig_step_progress = QtCore.Signal(int, str)          # step progress (0~100)
+    sig_overall_progress = QtCore.Signal(int, int)       # done, total
+    sig_file_done = QtCore.Signal(str, str)              # in_path, out_path
+    sig_error = QtCore.Signal(str, str)
+    sig_finished = QtCore.Signal()
 
     def __init__(self, files, output_dir, params, parent=None):
         super().__init__(parent)
@@ -893,9 +897,8 @@ class DSREWorker(QtCore.QThread):
         self._abort = True
 
     def tr(self, key: str) -> str:
-        """워커용 번역 함수"""
-        lang = self.params.get('lang', 'ko')
-        return STRINGS.get(lang, STRINGS["ko"]).get(key, key)
+        lang = self.params.get('lang', 'en')
+        return STRINGS.get(lang, STRINGS["en"]).get(key, key)
 
     def run(self):
         total = len(self.files)
@@ -921,13 +924,13 @@ class DSREWorker(QtCore.QThread):
                 # Resample
                 target_sr = int(self.params["target_sr"])
                 is_upsample = target_sr > sr
+                src_sr = sr
                 y = resample_ardftsrc(
                     y, sr, target_sr,
                         bit_depth=32,
                         quality=8192 if is_upsample else 4096,
                         bandwidth=0.999  if is_upsample else 0.970,
                     )
-                sr_original = sr
                 sr = target_sr
 
                 # Processing
@@ -937,9 +940,9 @@ class DSREWorker(QtCore.QThread):
 
                 y_out = zansei_impl(
                     y, sr,
+                    src_sr=src_sr,
                     progress_cb=step_cb,
-                    abort_cb=lambda: self._abort,
-                    src_sr=sr_original,
+                    abort_cb=lambda: self._abort
                 )
 
                 # Save
@@ -966,8 +969,7 @@ class DSREWorker(QtCore.QThread):
         self.sig_finished.emit()
 
 # ======== GUI ========
-class DragDropListWidget(QtWidgets.QListWidget):   #DragDrop 위젯 
-    """드래그 앤 드롭을 지원하는 파일 목록 위젯"""
+class DragDropListWidget(QtWidgets.QListWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAcceptDrops(True)
@@ -1002,24 +1004,24 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
 
-        # 상태 초기화
-        self.lang = "ko"
+        # Initialize
+        self.lang = "en"
         self.dark_mode = True
         self.recent_files = []
         self.max_recent_files = 10
         self.failed_files = []
 
-        # 기본 설정
+        # Window
         self.setWindowTitle(self.tr("title"))
         icon_path = os.path.join(os.path.dirname(__file__), "logo.ico")
         self.setWindowIcon(QIcon(icon_path))
         self.resize(1024, 640)
 
-        # 중앙 위젯
+        # Central
         self.central_widget = QtWidgets.QWidget()
         self.setCentralWidget(self.central_widget)
 
-        # 위젯 생성
+        # Start
         self.list_files = DragDropListWidget()
         self.list_files.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
         self.list_files.setSelectionMode(
@@ -1062,18 +1064,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cb_format.addItems(["FLAC", "ALAC"])
 
         self.cb_lang = QtWidgets.QComboBox()
-        self.cb_lang.addItem("한국어", userData="ko")
-        self.cb_lang.addItem("日本語", userData="ja")
         self.cb_lang.addItem("English", userData="en")
+        self.cb_lang.addItem("日本語", userData="ja")
+        self.cb_lang.addItem("한국어", userData="ko")
         self.cb_lang.addItem("中文", userData="zh")
 
         self.te_log = QtWidgets.QTextEdit()
         self.te_log.setReadOnly(True)
 
-        # 레이아웃
+        # Layout
         main_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
 
-        # 좌측: 파일 목록
+        # Left: File list
         left_widget = QtWidgets.QWidget()
         left_layout = QtWidgets.QVBoxLayout()
         self.lbl_files = QtWidgets.QLabel(self.tr("input_files"))
@@ -1083,7 +1085,7 @@ class MainWindow(QtWidgets.QMainWindow):
         left_widget.setLayout(left_layout)
         main_splitter.addWidget(left_widget)
 
-        # 중앙: 변환 조작
+        # Center: Transformation Operations
         middle_widget = QtWidgets.QWidget()
         middle_widget.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Preferred,
@@ -1115,7 +1117,7 @@ class MainWindow(QtWidgets.QMainWindow):
         middle_widget.setLayout(middle_layout)
         main_splitter.addWidget(middle_widget)
 
-        # 우측: 파라미터 + 진행바
+        # Right: Parameters + Progress Bar
         right_widget = QtWidgets.QWidget()
         right_layout = QtWidgets.QVBoxLayout()
         self.lbl_params = QtWidgets.QLabel(self.tr("params"))
@@ -1141,7 +1143,7 @@ class MainWindow(QtWidgets.QMainWindow):
         vprog.addWidget(self.lbl_eta)
         vprog.addSpacing(10)
 
-        # 언어 선택 (진행바 아래)
+        # Select Language
         lang_layout = QtWidgets.QHBoxLayout()
         self.lbl_lang = QtWidgets.QLabel(self.tr("lang_label"))
         lang_layout.addWidget(self.lbl_lang)
@@ -1155,7 +1157,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         main_splitter.setSizes([300, 300, 400])
 
-        # 수직 스플리터
+        # Vertical Splitter
         vertical_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
         vertical_splitter.addWidget(main_splitter)
 
@@ -1172,7 +1174,7 @@ class MainWindow(QtWidgets.QMainWindow):
         main_layout.addWidget(vertical_splitter)
         self.central_widget.setLayout(main_layout)
 
-        # 시그널 연결
+        # Signal Connection
         self.btn_add.clicked.connect(self.on_add_files)
         self.btn_clear.clicked.connect(self.on_clear_files)
         self.btn_remove_selected.clicked.connect(self.on_remove_selected)
@@ -1186,24 +1188,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker: Optional[DSREWorker] = None
         self.config_file = get_config_path("DSRE.json")
 
-        # 설정 불러오기
+        # Load Settings
         self.load_config()
 
-        # 파라미터 변경 시 자동 저장
+        # Auto-save when parameters are changed
         self.cb_sr.currentIndexChanged.connect(self.save_config)
         self.le_outdir.textChanged.connect(self.save_config)
         self.cb_format.currentTextChanged.connect(self.save_config)
 
-        # 메뉴바 / 상태바
+        # Menu Bar / Status Bar
         self.create_menu_bar()
         self.statusBar().showMessage(self.tr("ready"))
 
         self.update_recent_files_menu()
 
-        # 초기화 완료 후 언어 적용
+        # Language applied after initialization
         self.retranslate_ui()
 
-        # 테마 / 환영 메시지
+        # Theme / Welcome Message
         self.apply_theme()
 
         self.append_log(self.tr("log_author"))
@@ -1213,11 +1215,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.append_log(self.tr("log_localizer"))
 
     def tr(self, key: str) -> str:
-        """현재 언어에 맞는 문자열 반환"""
         return STRINGS.get(self.lang, STRINGS["ko"]).get(key, key)
 
     def retranslate_ui(self):
-        """언어 변경 시 UI 텍스트 업데이트"""
         self.setWindowTitle(self.tr("title"))
         self.lbl_files.setText(self.tr("input_files"))
         self.lbl_ops.setText(self.tr("convert"))
@@ -1242,7 +1242,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_log.setText(self.tr("log"))
 
     def _on_lang_changed(self):
-        """언어 변경 콜백"""
         self.lang = self.cb_lang.currentData()
         self.retranslate_ui()
         self.menuBar().clear()
@@ -1447,7 +1446,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.le_outdir.setText(d)
 
     def load_config(self):
-        # 설정 불러오는 동안 모든 시그널 차단
         for widget in [self.cb_sr, self.le_outdir, self.cb_format, self.cb_lang]:
             widget.blockSignals(True)
         try:
@@ -1472,7 +1470,6 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.tr("light_mode") if self.dark_mode
                     else self.tr("dark_mode"))
 
-                # 언어 불러오기
                 saved_lang = config.get('lang', 'ko')
                 self.lang = saved_lang
                 for i in range(self.cb_lang.count()):
