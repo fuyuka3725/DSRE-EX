@@ -59,7 +59,7 @@ This fork was created to maintain the discontinued Ver 3.x. You can view the cha
 ## TODO
 
 - [x] Fix the automatic parameter calculation formula so that it does not reference the resampling space.
-- [ ] Fix the issue where sound quality was degraded in certain frequency bands.
+- [x] Fix the issue where sound quality was degraded in certain frequency bands.
 - [ ] Make adjustments so that the file name can be changed even if the file to be converted has the same path as the original file.
 - [ ] Other GUI debuging.
 - [ ] Imports a MacOS GUI from [CrossDarkrix/DSRE-Audio-Enhancer](https://github.com/CrossDarkrix/DSRE-Audio-Enhancer).
