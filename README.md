@@ -71,6 +71,6 @@ This fork was created to maintain the discontinued Ver 3.x. You can view the cha
 - ARDFTSRC: https://github.com/mrspoonsi/ARDFTSRC
 - FFmpeg: https://ffmpeg.org/
 
-SOME PART OF THIS SOURCE CODE WERE GENERATED USING AI (X.com Grok & Anthropic Claude).
+SOME PART OF THIS SOURCE CODE WERE GENERATED USING AI (Google Gemini & Anthropic Claude).
 THIS IMPLIES THAT AI CODE GENERATORS WAS USED, BUT IT DOES NOT MEAN THAT
 THE PROGRAM ITSELF OPERATES USING AI
