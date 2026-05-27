@@ -155,7 +155,7 @@ def freq_shift_mono(x: np.ndarray, f_shift: float, d_sr: float) -> np.ndarray:
     result = (S_hilbert * S_factor)[:N_orig].real
     return result.astype(np.float32)
 
-# Automatic Hi-Pass Detection Logic
+# AutoHPF
 def freq_shift_multi(x: np.ndarray, f_shift: float, d_sr: float) -> np.ndarray:
     return np.asarray(
         [freq_shift_mono(x[i], f_shift, d_sr) for i in range(len(x))],
@@ -207,7 +207,7 @@ def auto_hp_params(y: np.ndarray, sr: int):
 
     return pre_hp, post_hp
 
-#Spectrum Roll-Off-Based Parameter Auto-Tuning
+#Auto Params
 def auto_zansei_params(y: np.ndarray, sr: int, pre_hp: float, post_hp: float):
     mono = y.mean(axis=0) if y.ndim > 1 else y
 
@@ -303,7 +303,7 @@ def auto_zansei_params(y: np.ndarray, sr: int, pre_hp: float, post_hp: float):
 
     return m, decay
 
-# A-weighting Blender
+# A-weighting Blend
 def apply_a_weighting_blend(x, d_res, sr, blend=0.15):
     freqs = np.fft.rfftfreq(x.shape[-1], 1 / sr)
     freqs[0] = 1e-10
@@ -340,133 +340,6 @@ def apply_a_weighting_blend(x, d_res, sr, blend=0.15):
 
     return x + d_res_weighted * adj_factor
 
-#Spectral Subtraction Denoise
-def spectral_denoise(y: np.ndarray, sr: int, strength: float = 0.5, protect_hz: float = 200.0) -> np.ndarray:
-
-    is_1d = y.ndim == 1
-    if is_1d:
-        y = y[np.newaxis, :]
-
-    result = np.zeros_like(y)
-
-    for ch in range(y.shape[0]):
-        x = y[ch]
-        # Estimating the noise floor on a chunk-by-chunk basis
-        chunk_size = sr // 4
-        chunks = [x[i:i+chunk_size]
-                  for i in range(0, len(x)-chunk_size, chunk_size)]
-
-        # Use the quietest section as the noise profile
-        energies = [np.mean(c**2) for c in chunks]
-        noise_idx = np.argmin(energies)
-        noise_chunk = chunks[noise_idx]
-
-        # Noise Spectrum Estimation
-        noise_mag = np.abs(np.fft.rfft(
-            np.pad(noise_chunk, (0, len(x) - len(noise_chunk)))))
-
-        D = np.fft.rfft(x)
-        mag = np.abs(D)
-        phase = np.angle(D)
-
-        snr = mag / (noise_mag * strength + 1e-12)
-        gain = snr / (snr + 1.0)
-        gain = np.maximum(gain, 0.1)
-
-        freqs = np.fft.rfftfreq(len(x), 1 / sr)
-        protect_idx = np.searchsorted(freqs, protect_hz)
-        gain[:protect_idx] = 1.0
-
-        D_clean = gain * mag * np.exp(1j * phase)
-        result[ch] = np.fft.irfft(D_clean, n=len(x)).astype(np.float32)
-
-    return result[0] if is_1d else result
-
-#Transient Sharp
-def transient_sharpening(y: np.ndarray, sr: int, strength: float = 0.3) -> np.ndarray:
-    if y.ndim == 1:
-        y = y[np.newaxis, :]
-
-    result = np.zeros_like(y)
-
-    for ch in range(y.shape[0]):
-        x = y[ch]
-        n = len(x)
-
-        frame_size = int(sr * 0.01)
-
-        energy = np.array([
-            np.mean(x[i:i+frame_size]**2)
-            for i in range(0, len(x)-frame_size, frame_size)
-        ])
-
-        energy_diff = np.diff(energy, prepend=energy[0])
-        transient = np.maximum(energy_diff, 0)
-
-        transient_samples = np.interp(
-            np.arange(n),
-            np.linspace(0, n, len(transient)),
-            transient
-        )
-
-        gain = 1.0 + strength * transient_samples / (
-            np.max(transient_samples) + 1e-12)
-
-        result[ch] = (x * gain).astype(np.float32)
-
-    return result[0] if y.shape[0] == 1 else result
-
-#Bark
-def critical_band_enhance(y: np.ndarray, sr: int,
-                           strength: float = 0.2) -> np.ndarray:
-    bark_bands = [
-        (200, 300), (300, 400), (400, 510),
-        (510, 630), (630, 770), (770, 920),
-        (920, 1080), (1080, 1270), (1270, 1480),
-        (1480, 1720), (1720, 2000), (2000, 2320),
-        (2320, 2700), (2700, 3150), (3150, 3700),
-        (3700, 4400), (4400, 5300), (5300, 6400),
-    ]
-
-    if y.ndim == 1:
-        y = y[np.newaxis, :]
-
-    result = np.zeros_like(y)
-
-    for ch in range(y.shape[0]):
-        x = y[ch]
-        freqs = np.fft.rfftfreq(len(x), 1 / sr)
-        D = np.fft.rfft(x)
-        mag = np.abs(D)
-        phase = np.angle(D)
-
-        band_energies = []
-        for lo, hi in bark_bands:
-            idx_lo = np.searchsorted(freqs, lo)
-            idx_hi = np.searchsorted(freqs, hi)
-            band_energies.append(
-                float(np.mean(mag[idx_lo:idx_hi]**2) + 1e-12))
-
-        gain = np.ones_like(mag)
-        for i, (lo, hi) in enumerate(bark_bands):
-            idx_lo = np.searchsorted(freqs, lo)
-            idx_hi = np.searchsorted(freqs, hi)
-
-            neighbors = band_energies[max(0,i-1):i] + \
-                       band_energies[i+1:min(len(band_energies),i+2)]
-            if neighbors:
-                neighbor_mean = np.mean(neighbors)
-                contrast = band_energies[i] / (neighbor_mean + 1e-12)
-
-                band_gain = 1.0 + strength * np.log1p(contrast) * 0.3
-                gain[idx_lo:idx_hi] = band_gain
-
-        D_enhanced = gain * mag * np.exp(1j * phase)
-        result[ch] = np.fft.irfft(
-            D_enhanced, n=len(x)).astype(np.float32)
-
-    return result[0] if y.shape[0] == 1 else result
-
 def zansei_impl(
     x: np.ndarray,
     sr: int,
@@ -484,10 +357,9 @@ def zansei_impl(
     if m == 0 or decay == 0.00:
         m, decay = auto_zansei_params(x, analysis_sr, pre_hp, post_hp)
 
-    # Pre-processing HPF & Denoise
-    x_clean = spectral_denoise(x, sr, strength=0.4, protect_hz=200.0)
+    # Pre-processing HPF
     sos = signal.butter(9, pre_hp / (sr / 2), 'highpass', output='sos')
-    d_src = signal.sosfiltfilt(sos, x_clean)
+    d_src = signal.sosfiltfilt(sos, x)
 
     d_sr = 1.0 / sr
     f_dn = freq_shift_mono if (x.ndim == 1) else freq_shift_multi
@@ -551,9 +423,6 @@ def zansei_impl(
                 D * suppress_mask, n=d_res.shape[-1])
 
     y = x + d_res_masked * adj_factor
-
-    y = transient_sharpening(y, sr, strength=0.2)
-    y = critical_band_enhance(y, sr, strength=0.1)
 
     return y
 
@@ -929,7 +798,7 @@ class DSREWorker(QtCore.QThread):
                     y, sr, target_sr,
                         bit_depth=32,
                         quality=8192 if is_upsample else 4096,
-                        bandwidth=0.999  if is_upsample else 0.970,
+                        bandwidth=0.999  if is_upsample else 0.956,
                     )
                 sr = target_sr
 
