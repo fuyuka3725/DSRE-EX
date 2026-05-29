@@ -144,15 +144,24 @@ def load_audio(in_path: str):
 # ======== DSP：SSB ========
 def freq_shift_mono(x: np.ndarray, f_shift: float, d_sr: float) -> np.ndarray:
     N_orig = len(x)
-    # Logic that pads up to the square of 2 to improve the efficiency of FFT/Hilbert transform implementations
-    N_padded = 1 << int(np.ceil(np.log2(max(1, N_orig))))
     x_f32 = x.astype(np.float32)
-    padded = np.hstack((x_f32, np.zeros(N_padded - N_orig, dtype=np.float32)))
-    S_hilbert = signal.hilbert(padded).astype(np.complex64)
-    S_factor = np.exp(
-        2j * np.pi * f_shift * d_sr * np.arange(0, N_padded)
-    ).astype(np.complex64)
-    result = (S_hilbert * S_factor)[:N_orig].real
+    poles_A = [0.4794008, 0.8762184, 0.9765975, 0.9971492]
+    poles_B = [0.1617585, 0.7330289, 0.9453499, 0.9927737]
+    x_A = x_f32.copy()
+    x_B = x_f32.copy()
+    for p in poles_A:
+        b = [p, 1.0]
+        a = [1.0, p]
+        x_A = signal.lfilter(b, a, x_A)
+    for p in poles_B:
+        b = [p, 1.0]
+        a = [1.0, p]
+        x_B = signal.lfilter(b, a, x_B)
+    t = np.arange(0, N_orig, dtype=np.float32)
+    omega = 2.0 * np.pi * f_shift * d_sr
+    cos_factor = np.cos(omega * t)
+    sin_factor = np.sin(omega * t)
+    result = (x_A * cos_factor) - (x_B * sin_factor)
     return result.astype(np.float32)
 
 # AutoHPF
@@ -303,42 +312,52 @@ def auto_zansei_params(y: np.ndarray, sr: int, pre_hp: float, post_hp: float):
 
     return m, decay
 
-# A-weighting Blend
-def apply_a_weighting_blend(x, d_res, sr, blend=0.15):
-    freqs = np.fft.rfftfreq(x.shape[-1], 1 / sr)
-    freqs[0] = 1e-10
+# ======== EC-BWE: Envelope Shaping ========
+def _short_term_rms(x: np.ndarray, sr: int, frame_ms: float = 8.0) -> np.ndarray:
+    frame = max(1, int(sr * frame_ms / 1000))
+    x2  = x.astype(np.float64) ** 2
+    pad = np.pad(x2, (frame // 2, frame - frame // 2), mode='edge')
+    cs  = np.cumsum(pad)
+    return np.sqrt(np.maximum((cs[frame:] - cs[:-frame]) / frame, 0.0)).astype(np.float32)
 
-    # A-weighting Curve
-    f2 = freqs ** 2
-    f4 = freqs ** 4
-    aw = (12194 ** 2 * f4) / (
-        (f2 + 20.6 ** 2) *
-        np.sqrt((f2 + 107.7 ** 2) * (f2 + 737.9 ** 2)) *
-        (f2 + 12194 ** 2)
-    )
-    aw = aw / aw.max()
 
-    if d_res.ndim == 1:
-        D = np.fft.rfft(d_res)
-        D_weighted = D * aw
-        d_res_weighted = np.fft.irfft(D_weighted, n=d_res.shape[-1])
-    else:
-        d_res_weighted = np.zeros_like(d_res)
-        for ch in range(d_res.shape[0]):
-            D = np.fft.rfft(d_res[ch])
-            D_weighted = D * aw
-            d_res_weighted[ch] = np.fft.irfft(D_weighted, n=d_res.shape[-1])
+def _envelope_shaping(d_res: np.ndarray, x: np.ndarray,
+                      sr: int, post_hp: float, src_nyquist: float,
+                      hf_ratio: float) -> np.ndarray:
+    nyq   = sr / 2.0
+    ref_lo = np.clip(post_hp      / nyq,        1e-4, 0.999)
+    ref_hi = np.clip(src_nyquist  / nyq * 0.97, ref_lo + 1e-4, 0.999)
 
-    adp_power = float(np.mean(np.abs(d_res_weighted)))
-    src_power = float(np.mean(np.abs(x)))
+    if ref_hi <= ref_lo:
+        return d_res
 
-    if adp_power < 1e-10:
-        return x
+    sos_ref = signal.butter(4, [ref_lo, ref_hi], 'bandpass', output='sos')
 
-    adj_factor = (src_power / adp_power) * blend
-    adj_factor = min(adj_factor, 2.0)
+    is_1d    = d_res.ndim == 1
+    x_2d     = x[np.newaxis, :]     if is_1d else x
+    d_res_2d = d_res[np.newaxis, :] if is_1d else d_res
+    out      = np.zeros_like(d_res_2d)
 
-    return x + d_res_weighted * adj_factor
+    shaping_strength = float(np.clip(1.0 - hf_ratio * 10.0, 0.3, 1.0))
+
+    for ch in range(d_res_2d.shape[0]):
+        ref_env = _short_term_rms(
+            signal.sosfiltfilt(sos_ref, x_2d[ch]), sr, frame_ms=8.0)
+        gen_env = _short_term_rms(d_res_2d[ch], sr, frame_ms=8.0)
+
+        raw_gain = ref_env / (gen_env + 1e-7)
+
+        sf_  = max(1, int(sr * 20.0 / 1000))
+        pad  = np.pad(raw_gain, (sf_ // 2, sf_ - sf_ // 2), mode='edge')
+        cs   = np.cumsum(pad.astype(np.float64))
+        gain = ((cs[sf_:] - cs[:-sf_]) / sf_).astype(np.float32)
+        gain = np.clip(gain, 0.0, 3.0)
+
+        gain = gain * shaping_strength + 1.0 * (1.0 - shaping_strength)
+        out[ch] = (d_res_2d[ch] * gain).astype(np.float32)
+
+    return out[0] if is_1d else out
+
 
 def zansei_impl(
     x: np.ndarray,
@@ -351,7 +370,6 @@ def zansei_impl(
 ) -> np.ndarray:
 
     analysis_sr = src_sr if src_sr is not None else sr
-
     pre_hp, post_hp = auto_hp_params(x, analysis_sr)
 
     if m == 0 or decay == 0.00:
@@ -385,19 +403,13 @@ def zansei_impl(
 
     sos_hf = signal.butter(4, post_hp / (sr / 2), 'highpass', output='sos')
     x_hf = signal.sosfiltfilt(sos_hf, x)
-    src_hf_power = float(np.mean(np.abs(x_hf)))
-    src_hf_power = max(src_hf_power, src_power * 0.01)
-
+    src_hf_power = max(float(np.mean(np.abs(x_hf))), src_power * 0.01)
     hf_ratio = src_hf_power / (src_power + 1e-12)
     hf_scale = float(np.clip(hf_ratio * 20.0, 0.05, 1.0))
-
-    adj_factor = (src_power / adp_power) * 0.10 * hf_scale
-    adj_factor = min(adj_factor, 0.5)
 
     # A-weighting
     freqs = np.fft.rfftfreq(x.shape[-1], 1 / sr)
     freqs[0] = 1e-10
-
     f2 = freqs ** 2
     f4 = freqs ** 4
     aw = (12194 ** 2 * f4) / (
@@ -405,25 +417,37 @@ def zansei_impl(
         np.sqrt((f2 + 107.7 ** 2) * (f2 + 737.9 ** 2)) *
         (f2 + 12194 ** 2)
     )
-    aw = aw / aw.max()
+    aw = aw / (aw.max() + 1e-10)
 
     suppress_mask = np.ones_like(aw)
     mid_idx_lo = np.searchsorted(freqs, 2000)
     mid_idx_hi = np.searchsorted(freqs, 8000)
-    suppress_mask[mid_idx_lo:mid_idx_hi] = aw[mid_idx_lo:mid_idx_hi]
+    suppress_mask[mid_idx_lo:mid_idx_hi] = 1.0 - aw[mid_idx_lo:mid_idx_hi]
 
-    if d_res.ndim == 1:
-        D = np.fft.rfft(d_res)
-        d_res_masked = np.fft.irfft(D * suppress_mask, n=d_res.shape[-1])
+    if x.ndim == 1:
+        x_band_limited = np.fft.irfft(np.fft.rfft(x) * suppress_mask, n=x.shape[-1])
+        d_res_masked = np.fft.irfft(np.fft.rfft(d_res) * suppress_mask, n=d_res.shape[-1])
     else:
+        x_band_limited = np.zeros_like(x)
         d_res_masked = np.zeros_like(d_res)
-        for ch in range(d_res.shape[0]):
-            D = np.fft.rfft(d_res[ch])
-            d_res_masked[ch] = np.fft.irfft(
-                D * suppress_mask, n=d_res.shape[-1])
+        for ch in range(x.shape[0]):
+            x_band_limited[ch] = np.fft.irfft(np.fft.rfft(x[ch]) * suppress_mask, n=x.shape[-1])
+            d_res_masked[ch] = np.fft.irfft(np.fft.rfft(d_res[ch]) * suppress_mask, n=d_res.shape[-1])
+
+    adp_power_corrected = float(np.mean(np.abs(d_res_masked)))
+    src_power_corrected = float(np.mean(np.abs(x_band_limited)))
+
+    if adp_power_corrected < 1e-10:
+        return x
+
+    adj_factor = (src_power_corrected / adp_power_corrected) * 0.10 * hf_scale
+    adj_factor = min(adj_factor, 0.5)
+
+    src_nyquist = analysis_sr / 2.0
+    d_res_masked = _envelope_shaping(
+        d_res_masked, x, sr, post_hp, src_nyquist, hf_ratio)
 
     y = x + d_res_masked * adj_factor
-
     return y
 
 # ======== Resampler : ARDFTSRC ========
@@ -484,7 +508,7 @@ def resample_ardftsrc(
 
     num_chunks = x.shape[0] // in_nb_samples
 
-    # C++ sigmoid taper Modulation
+    # Sigmoid taper Modulation
     taper = np.zeros(taper_size, dtype=complex)
     for idx in range(taper_size):
         if idx < tr_nb_samples - taper_samples:
@@ -545,7 +569,7 @@ def resample_ardftsrc(
     y_out = result.T.astype(np.float32)
     return y_out[0] if is_1d else y_out
 
-# ======== 언어 스트링스 ========
+# ======== Language Strings ========
 STRINGS = {
     "ko": {
         "title":        "DSRE EX",
@@ -1267,7 +1291,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def show_about(self):
         QtWidgets.QMessageBox.about(self, self.tr("about"),
             "DSRE EX\n\n"
-            "ヒルベルト変換基礎SSB周波数シフト技術\n"
+            "IIR Network SSB周波数シフト技術\n"
             "オーディオアップスケーラー\n\n"
             "ARDFTSRC 高品質リサンプリング処理\n"
             "完全自動パラメータ調整技術対応\n\n"
