@@ -312,6 +312,79 @@ def auto_zansei_params(y: np.ndarray, sr: int, pre_hp: float, post_hp: float):
 
     return m, decay
 
+def _crossover_wiener(
+    x: np.ndarray,
+    sr: int,
+    post_hp: float,
+    src_nyquist: float,
+    floor: float = 0.02,
+    frame_ms: float = 50.0,
+    noise_percentile: float = 10.0,
+) -> np.ndarray:
+    is_1d = x.ndim == 1
+    x_2d  = x[np.newaxis, :] if is_1d else x
+    out   = x_2d.copy()
+
+    frame  = max(1, int(sr * frame_ms / 1000))
+    n_fft  = frame
+    freqs  = np.fft.rfftfreq(n_fft, 1.0 / sr)
+
+    band_lo = np.searchsorted(freqs, post_hp)
+    band_hi = np.searchsorted(freqs, src_nyquist)
+    if band_hi <= band_lo:
+        return x
+
+    for ch in range(x_2d.shape[0]):
+        sig = x_2d[ch].astype(np.float64)
+        n   = len(sig)
+
+        frames = [sig[i:i + frame] for i in range(0, n - frame, frame // 2)]
+        if not frames:
+            continue
+
+        specs  = [np.fft.rfft(f * np.hanning(len(f)), n=n_fft) for f in frames]
+        energies = [float(np.mean(np.abs(s[band_lo:band_hi]) ** 2)) for s in specs]
+
+        threshold = np.percentile(energies, noise_percentile)
+        noise_frames = [s for s, e in zip(specs, energies) if e <= threshold]
+        if not noise_frames:
+            noise_frames = [specs[int(np.argmin(energies))]]
+
+        noise_psd = np.mean(np.abs(np.array(noise_frames)) ** 2, axis=0)  # (n_bins,)
+
+        X_full = np.fft.rfft(sig, n=n)
+        freqs_full = np.fft.rfftfreq(n, 1.0 / sr)
+        band_lo_f = np.searchsorted(freqs_full, post_hp)
+        band_hi_f = np.searchsorted(freqs_full, src_nyquist)
+
+        noise_psd_full = np.interp(
+            freqs_full[band_lo_f:band_hi_f],
+            freqs,
+            noise_psd
+        )
+
+        X_band = X_full[band_lo_f:band_hi_f]
+        sig_psd = np.abs(X_band) ** 2
+
+        # 1-Pass
+        SNR1 = sig_psd / (noise_psd_full + 1e-12)
+        G1   = SNR1 / (SNR1 + 1.0)
+        G1   = np.maximum(G1, floor)
+
+        # 2-Pass
+        residual_psd   = np.abs(X_band * (1.0 - G1)) ** 2
+        noise_psd2     = noise_psd_full + residual_psd
+        SNR2           = (np.abs(X_band * G1) ** 2) / (noise_psd2 + 1e-12)
+        G2             = SNR2 / (SNR2 + 1.0)
+        G2             = np.maximum(G2, floor)
+
+        G_full = np.ones(len(X_full), dtype=np.float64)
+        G_full[band_lo_f:band_hi_f] = G2
+
+        out[ch] = np.fft.irfft(X_full * G_full, n=n).astype(np.float32)
+
+    return out[0] if is_1d else out
+
 # ======== EC-BWE: Envelope Shaping ========
 def _short_term_rms(x: np.ndarray, sr: int, frame_ms: float = 8.0) -> np.ndarray:
     frame = max(1, int(sr * frame_ms / 1000))
@@ -358,7 +431,6 @@ def _envelope_shaping(d_res: np.ndarray, x: np.ndarray,
 
     return out[0] if is_1d else out
 
-
 def zansei_impl(
     x: np.ndarray,
     sr: int,
@@ -378,6 +450,7 @@ def zansei_impl(
     # Pre-processing HPF
     sos = signal.butter(9, pre_hp / (sr / 2), 'highpass', output='sos')
     d_src = signal.sosfiltfilt(sos, x)
+    d_src = _crossover_wiener(d_src, sr, post_hp, analysis_sr / 2.0, floor=0.02)
 
     d_sr = 1.0 / sr
     f_dn = freq_shift_mono if (x.ndim == 1) else freq_shift_multi
@@ -571,56 +644,6 @@ def resample_ardftsrc(
 
 # ======== Language Strings ========
 STRINGS = {
-    "ko": {
-        "title":        "DSRE EX",
-        "input_files":  "음원 파일 목록",
-        "add_files":    "음원 파일 추가",
-        "clear_files":  "전체 항목 제거",
-        "remove_sel":   "선택 항목 제거",
-        "output_dir":   "출력 경로",
-        "select_dir":   "출력 경로 선택",
-        "convert":      "변환",
-        "start":        "변환 시작",
-        "cancel":       "변환 취소",
-        "retry":        "실패한 파일 재시도",
-        "params":       "출력 설정",
-        "m_label":      "변조값:",
-        "decay_label":  "감쇠율:",
-        "sr_label":     "목표 샘플링 레이트:",
-        "fmt_label":    "출력 인코딩 형식:",
-        "file_prog":    "현재 파일 처리 진행률",
-        "all_prog":     "전체 파일 처리 진행률",
-        "log":          "로그",
-        "ready":        "준비완료",
-        "light_mode":   "라이트 모드",
-        "dark_mode":    "다크 모드",
-        "about":        "정보",
-        "file_menu":    "파일(&F)",
-        "process_menu": "처리(&P)",
-        "help_menu":    "도움말(&H)",
-        "output_placeholder": "지정 폴더",
-        "lang_label":        "언어:",
-        "recent_files":      "최근 파일(&R)",
-        "exit":              "종료(&X)",
-        "no_recent":         "최근 파일 없음",
-        "file_not_found":    "파일 없음",
-        "file_not_found_msg": "파일을 찾을 수 없습니다",
-        "convert_error":     "변환 오류",
-        "no_files_warning":  "변환할 파일을 한 개 이상 선택해주세요.",
-        "processing":        "작업 처리 중…",
-        "preparing":     "{n}개의 파일을 변환할 준비 중",
-        "retrying":          "재시도 중",
-        "cancelling":        "변환 취소 중",
-        "finished":          "변환이 완료되었습니다.",
-        "done":              "완료",
-        "error":             "오류",
-        "log_loading": "불러오는 중: {path}",
-        "log_saved":   "변환 완료: {path}",
-        "log_author":        "원작자: 屈乐凡(Qu Le Fan)",
-        "log_report":        "리포트: Le_Fan_Qv@outlook.com",
-        "log_contact":       "연락처: 323861356 (QQ)",
-        "log_localizer":     "현지화 및 개조: 느와르(Noir16)",
-    },
     "en": {
         "title":        "DSRE EX",
         "input_files":  "Audio Files List",
@@ -666,58 +689,9 @@ STRINGS = {
         "error":             "Error",
         "log_loading": "Loading…: {path}",
         "log_saved":   "Conversion Completed: {path}",
-        "log_author":        "Original Author: 屈乐凡(Qu Le Fan)",
-        "log_report":        "Report: Le_Fan_Qv@outlook.com",
-        "log_contact":       "Contact: 323861356 (QQ)",
-        "log_localizer":     "Localization and Modification: Noir16",
-    },
-    "zh": {
-        "title":        "DSRE EX",
-        "input_files":  "歌曲列表",
-        "add_files":    "添加输入文件",
-        "clear_files":  "清空输入列表",
-        "remove_sel":   "清空输入所选",
-        "output_dir":   "输出路径",
-        "select_dir":   "选择输出目录",
-        "convert":      "转换",
-        "start":        "开始转换",
-        "cancel":       "取消转换",
-        "retry":        "重试失败文件",
-        "params":       "输出设置",
-        "sr_label":     "目标采样率:",
-        "fmt_label":    "输出编码格式:",
-        "file_prog":    "当前文件进度",
-        "all_prog":     "整体进度",
-        "log":          "日志",
-        "ready":        "准备就绪",
-        "light_mode":   "浅色模式",
-        "dark_mode":    "深色模式",
-        "about":        "关于",
-        "file_menu":    "文件(&F)",
-        "process_menu": "处理(&P)",
-        "help_menu":    "帮助(&H)",
-        "output_placeholder": "指定文件夹",
-        "lang_label":        "语言:",
-        "recent_files":      "最近文件(&R)",
-        "exit":              "退出(&X)",
-        "no_recent":         "最近没有文件",
-        "file_not_found":    "无文件",
-        "file_not_found_msg": "找不到该文件。",
-        "convert_error":     "没有文件",
-        "no_files_warning":  "请选择一个或多个要转换的文件。",
-        "processing":        "正在处理中",
-        "preparing":     "转换准备转换{n}个文件",
-        "retrying":          "转换重试",
-        "cancelling":        "转换撤销转换",
-        "finished":          "转换已完成。",
-        "done":              "完成",
-        "error":             "错误",
-        "log_loading": "正在加载: {path}",
-        "log_saved":   "转换完成: {path}",
-        "log_author":        "原作者: 屈乐凡(Qu Le Fan)",
-        "log_report":        "报告: Le_Fan_Qv@outlook.com",
-        "log_contact":       "联系: 323861356 (QQ)",
-        "log_localizer":     "本地化与修改: Noir16",
+        "log_author":        "Origin: Qu LeFan",
+        "log_localize":      "Localization: Noir16",
+        "log_mods":   "Mods: fuyuka3725",
     },
     "ja": {
         "title":        "DSRE EX",
@@ -762,10 +736,105 @@ STRINGS = {
         "error":             "エラー",
         "log_loading": "読み込み中: {path}",
         "log_saved":   "変換完了: {path}",
-        "log_author":        "原作者: 屈乐凡(Qu Le Fan)",
-        "log_report":        "レポート: Le_Fan_Qv@outlook.com",
-        "log_contact":       "連絡先: 323861356 (QQ)",
-        "log_localizer":     "現地化と改造: ノワール(Noir16)",
+        "log_author":        "原作者: 屈乐凡(Qu LeFan)",
+        "log_localize":      "現地化: ノワール(Noir16)",
+        "log_mods":   "改造: fuyuka3725",
+    },
+    "ko": {
+        "title":        "DSRE EX",
+        "input_files":  "음원 파일 목록",
+        "add_files":    "음원 파일 추가",
+        "clear_files":  "전체 항목 제거",
+        "remove_sel":   "선택 항목 제거",
+        "output_dir":   "출력 경로",
+        "select_dir":   "출력 경로 선택",
+        "convert":      "변환",
+        "start":        "변환 시작",
+        "cancel":       "변환 취소",
+        "retry":        "실패한 파일 재시도",
+        "params":       "출력 설정",
+        "m_label":      "변조값:",
+        "decay_label":  "감쇠율:",
+        "sr_label":     "목표 샘플링 레이트:",
+        "fmt_label":    "출력 인코딩 형식:",
+        "file_prog":    "현재 파일 처리 진행률",
+        "all_prog":     "전체 파일 처리 진행률",
+        "log":          "로그",
+        "ready":        "준비완료",
+        "light_mode":   "라이트 모드",
+        "dark_mode":    "다크 모드",
+        "about":        "정보",
+        "file_menu":    "파일(&F)",
+        "process_menu": "처리(&P)",
+        "help_menu":    "도움말(&H)",
+        "output_placeholder": "지정 폴더",
+        "lang_label":        "언어:",
+        "recent_files":      "최근 파일(&R)",
+        "exit":              "종료(&X)",
+        "no_recent":         "최근 파일 없음",
+        "file_not_found":    "파일 없음",
+        "file_not_found_msg": "파일을 찾을 수 없습니다",
+        "convert_error":     "변환 오류",
+        "no_files_warning":  "변환할 파일을 한 개 이상 선택해주세요.",
+        "processing":        "작업 처리 중…",
+        "preparing":     "{n}개의 파일을 변환할 준비 중",
+        "retrying":          "재시도 중",
+        "cancelling":        "변환 취소 중",
+        "finished":          "변환이 완료되었습니다.",
+        "done":              "완료",
+        "error":             "오류",
+        "log_loading": "불러오는 중: {path}",
+        "log_saved":   "변환 완료: {path}",
+        "log_author":        "원작자: 屈乐凡(Qu LeFan)",
+        "log_localize":      "현지화: 느와르(Noir16)",
+        "log_mods":   "개조: fuyuka3725",
+    },
+    "zh": {
+        "title":        "DSRE EX",
+        "input_files":  "歌曲列表",
+        "add_files":    "添加输入文件",
+        "clear_files":  "清空输入列表",
+        "remove_sel":   "清空输入所选",
+        "output_dir":   "输出路径",
+        "select_dir":   "选择输出目录",
+        "convert":      "转换",
+        "start":        "开始转换",
+        "cancel":       "取消转换",
+        "retry":        "重试失败文件",
+        "params":       "输出设置",
+        "sr_label":     "目标采样率:",
+        "fmt_label":    "输出编码格式:",
+        "file_prog":    "当前文件进度",
+        "all_prog":     "整体进度",
+        "log":          "日志",
+        "ready":        "准备就绪",
+        "light_mode":   "浅色模式",
+        "dark_mode":    "深色模式",
+        "about":        "关于",
+        "file_menu":    "文件(&F)",
+        "process_menu": "处理(&P)",
+        "help_menu":    "帮助(&H)",
+        "output_placeholder": "指定文件夹",
+        "lang_label":        "语言:",
+        "recent_files":      "最近文件(&R)",
+        "exit":              "退出(&X)",
+        "no_recent":         "最近没有文件",
+        "file_not_found":    "无文件",
+        "file_not_found_msg": "找不到该文件。",
+        "convert_error":     "没有文件",
+        "no_files_warning":  "请选择一个或多个要转换的文件。",
+        "processing":        "正在处理中",
+        "preparing":     "转换准备转换{n}个文件",
+        "retrying":          "转换重试",
+        "cancelling":        "转换撤销转换",
+        "finished":          "转换已完成。",
+        "done":              "完成",
+        "error":             "错误",
+        "log_loading": "正在加载: {path}",
+        "log_saved":   "转换完成: {path}",
+        "log_author":        "原作者: 屈乐凡",
+        "log_localize":      "本地化: Noir16",
+        "log_mods":   "改装: fuyuka3725",
     },
 }
 
@@ -1102,10 +1171,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.apply_theme()
 
         self.append_log(self.tr("log_author"))
-        self.append_log(self.tr("log_report"))
-        self.append_log(self.tr("log_contact"))
-        self.append_log("----------------------------------------------")
-        self.append_log(self.tr("log_localizer"))
+        self.append_log(self.tr("log_localize"))
+        self.append_log(self.tr("log_mods"))
 
     def tr(self, key: str) -> str:
         return STRINGS.get(self.lang, STRINGS["ko"]).get(key, key)
@@ -1291,14 +1358,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def show_about(self):
         QtWidgets.QMessageBox.about(self, self.tr("about"),
             "DSRE EX\n\n"
-            "IIR Network SSB周波数シフト技術\n"
-            "オーディオアップスケーラー\n\n"
-            "ARDFTSRC 高品質リサンプリング処理\n"
-            "完全自動パラメータ調整技術対応\n\n"
-            "原作者: 屈乐凡(Qu Le Fan)\n"
-            "レポート: Le_Fan_Qv@outlook.com\n"
-            "連絡先: 323861356 (QQ)\n\n"
-            "現地化と改造: ノワール(Noir16)")
+            "IIR Network Frequency Shift\n"
+            "Audio Upscaler.\n\n"
+            "Built-in ARDFTSRC Resampler.\n"
+            "Auto parameter adjustment.\n\n"
+            "Origin: Qu LeFan\n"
+            "Localization: Noir16\n"
+            "Mods: fuyuka3725")
 
     def on_add_files(self):
         filters = (
@@ -1544,7 +1610,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
 def main():
     import ctypes
-    myappid = "org.noir.dsre"
+    myappid = "org.fuyuka.dsre"
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 
     app = QtWidgets.QApplication(sys.argv)
