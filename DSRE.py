@@ -216,7 +216,7 @@ def auto_hp_params(y: np.ndarray, sr: int):
 
     return pre_hp, post_hp
 
-#Auto Params
+# Auto Params
 def auto_zansei_params(y: np.ndarray, sr: int, pre_hp: float, post_hp: float):
     mono = y.mean(axis=0) if y.ndim > 1 else y
 
