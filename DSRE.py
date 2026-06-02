@@ -66,17 +66,11 @@ def cmdrun(cmd, worker=None, **kw):
     proc.returncode = returncode
     return proc
 
-def apply_lossless_headroom(data, target_peak_db=-0.5):
+def lossless_headroom(data, drive=0.9, target_peak_db=-0.5):
+    scaled_data = data * drive
+    limited_data = np.tanh(scaled_data)
     target_peak_linear = 10 ** (target_peak_db / 20)
-    current_peak = np.max(np.abs(data))
-
-    if current_peak == 0:
-        return data
-
-    if current_peak > target_peak_linear:
-        scale_factor = target_peak_linear / current_peak
-        data = data * scale_factor
-
+    data = data * target_peak_linear
     return data
 
 def save_wav24_out(in_path, y_out, sr, out_path, worker=None, fmt="FLAC"):
@@ -89,7 +83,7 @@ def save_wav24_out(in_path, y_out, sr, out_path, worker=None, fmt="FLAC"):
         data = y_out.T if y_out.shape[0] < y_out.shape[1] else y_out
 
     data = data.astype(np.float32, copy=False)
-    data = apply_lossless_headroom(data)
+    data = lossless_headroom(data)
 
     tmp_wav = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
     tmp_wav.close()
