@@ -8,7 +8,7 @@ DSRE EX is a high-performance audio enhancement tool that can batch-convert any 
 
 ● DSRE
 
-It was originally developed by Chinese developer Qu Le fan(屈乐凡) and, as is well known, began as an audio upscaler project inspired by DSEE.
+It was originally developed by Chinese developer Qu Lefan(屈乐凡) and, as is well known, began as an audio upscaler project inspired by DSEE.
 Unfortunately, the developer is no longer maintaining it, and it has become a dead project.
 
 
@@ -33,7 +33,7 @@ Differences from the origin:
 
 -- There are no parameters. settings are adjusted automatically.
 
--- It incorporates psychoacoustic technology that serves a similar purpose to DSEE HX but uses a different approach.
+-- It incorporates psychoacoustic technology that serves a similar purpose to DSEE HX but uses a different approach. (However, it was causing thread distortion.)
 
 -- Multilingual support for 4 languages.
 
