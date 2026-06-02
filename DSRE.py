@@ -204,13 +204,13 @@ def freq_shift_mono(x: np.ndarray, f_shift: float, d_sr: float) -> np.ndarray:
     result = (x_A * cos_factor) - (x_B * sin_factor)
     return result.astype(np.float32)
 
-# AutoHPF
 def freq_shift_multi(x: np.ndarray, f_shift: float, d_sr: float) -> np.ndarray:
     return np.asarray(
         [freq_shift_mono(x[i], f_shift, d_sr) for i in range(len(x))],
         dtype=np.float32
     )
 
+# AutoHPF
 def auto_hp_params(y: np.ndarray, sr: int):
     mono = y.mean(axis=0) if y.ndim > 1 else y
 
@@ -259,7 +259,7 @@ def auto_hp_params(y: np.ndarray, sr: int):
 
     return pre_hp, post_hp
 
-#Auto Params
+# Auto Params
 def auto_zansei_params(y: np.ndarray, sr: int, pre_hp: float, post_hp: float):
     mono = y.mean(axis=0) if y.ndim > 1 else y
 
