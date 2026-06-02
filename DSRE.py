@@ -35,11 +35,51 @@ def add_ffmpeg_path(relative: str) -> str:
     return os.path.join(base, relative)
 
 add_ffmpeg_path("ffmpeg.exe")
-def cmdrun(cmd, **kw):
-    return subprocess.run(cmd,
-                          **get_subprocess_kwargs(), **kw)
+def cmdrun(cmd, worker=None, **kw):
+    stdout = kw.pop("stdout", None)
+    stderr = kw.pop("stderr", None)
+    check  = kw.pop("check", False)
 
-def save_wav24_out(in_path, y_out, sr, out_path, fmt="FLAC"):
+    if kw.pop("capture_output", False):
+        stdout = subprocess.PIPE
+        stderr = subprocess.PIPE
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=stdout,
+        stderr=stderr,
+        **get_subprocess_kwargs(),
+        **kw
+    )
+
+    if worker is not None:
+        worker._current_proc = proc
+
+    returncode = proc.wait()
+
+    if worker is not None:
+        worker._current_proc = None
+
+    if check and returncode != 0:
+        raise subprocess.CalledProcessError(returncode, cmd)
+
+    proc.returncode = returncode
+    return proc
+
+def apply_lossless_headroom(data, target_peak_db=-0.5):
+    target_peak_linear = 10 ** (target_peak_db / 20)
+    current_peak = np.max(np.abs(data))
+
+    if current_peak == 0:
+        return data
+
+    if current_peak > target_peak_linear:
+        scale_factor = target_peak_linear / current_peak
+        data = data * scale_factor
+
+    return data
+
+def save_wav24_out(in_path, y_out, sr, out_path, worker=None, fmt="FLAC"):
     import tempfile, subprocess, numpy as np, soundfile as sf, os
 
     # Check shape = (n, ch)
@@ -49,7 +89,7 @@ def save_wav24_out(in_path, y_out, sr, out_path, fmt="FLAC"):
         data = y_out.T if y_out.shape[0] < y_out.shape[1] else y_out
 
     data = data.astype(np.float32, copy=False)
-    data = np.clip(data, -1.0, 1.0)
+    data = apply_lossless_headroom(data)
 
     tmp_wav = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
     tmp_wav.close()
@@ -81,7 +121,7 @@ def save_wav24_out(in_path, y_out, sr, out_path, fmt="FLAC"):
             cover_tmp.close()
             cmdrun(
                 ["ffmpeg.exe", "-y", "-i", in_path, "-an", "-c:v", "copy", cover_tmp.name],
-                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                worker=worker, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
         except Exception:
             cover_tmp = None
@@ -113,7 +153,7 @@ def save_wav24_out(in_path, y_out, sr, out_path, fmt="FLAC"):
                 out_path
             ]
 
-    cmdrun(cmd, check=True)
+    cmdrun(cmd, worker=worker, check=True)
     os.remove(tmp_wav.name)
     if fmt == "FLAC" and cover_tmp and os.path.exists(cover_tmp.name):
         os.remove(cover_tmp.name)
@@ -164,23 +204,26 @@ def freq_shift_mono(x: np.ndarray, f_shift: float, d_sr: float) -> np.ndarray:
     result = (x_A * cos_factor) - (x_B * sin_factor)
     return result.astype(np.float32)
 
+# AutoHPF
 def freq_shift_multi(x: np.ndarray, f_shift: float, d_sr: float) -> np.ndarray:
     return np.asarray(
         [freq_shift_mono(x[i], f_shift, d_sr) for i in range(len(x))],
         dtype=np.float32
     )
 
-# AutoHPF
 def auto_hp_params(y: np.ndarray, sr: int):
     mono = y.mean(axis=0) if y.ndim > 1 else y
 
     chunk = sr // 2
     chunks = [mono[i:i+chunk] for i in range(0, len(mono)-chunk, chunk)]
-    energies = [np.mean(c**2) for c in chunks]
-    threshold_e = np.percentile(energies, 70)
-    active = [c for c, e in zip(chunks, energies) if e >= threshold_e]
 
-    active_signal = np.concatenate(active)
+    if not chunks:
+        active_signal = mono
+    else:
+        energies = [np.mean(c**2) for c in chunks]
+        threshold_e = np.percentile(energies, 70)
+        active = [c for c, e in zip(chunks, energies) if e >= threshold_e]
+        active_signal = np.concatenate(active) if active else mono
     freqs = np.fft.rfftfreq(len(active_signal), 1 / sr)
     mag = np.abs(np.fft.rfft(active_signal))
 
@@ -216,7 +259,7 @@ def auto_hp_params(y: np.ndarray, sr: int):
 
     return pre_hp, post_hp
 
-# Auto Params
+#Auto Params
 def auto_zansei_params(y: np.ndarray, sr: int, pre_hp: float, post_hp: float):
     mono = y.mean(axis=0) if y.ndim > 1 else y
 
@@ -294,21 +337,19 @@ def auto_zansei_params(y: np.ndarray, sr: int, pre_hp: float, post_hp: float):
     # Overall
     if no_hf_signal:
         if hf_noise_ratio < 0.1:
-            m, decay = 14, 0.65
+            m, decay = 8, 0.50
         elif ratio_95 > 0.5:
-            m, decay = 18, 0.75
+            m, decay = 10, 0.55
         else:
-            m, decay = 20, 0.80
+            m, decay = 12, 0.60
     elif flatness > 0.3 and slope > -2.0:
         m, decay = 4, 0.40
     elif flatness > 0.2 and slope > -3.0:
         m, decay = 10, 0.55
     elif flatness > 0.15 and slope > -4.0:
         m, decay = 12, 0.60
-    elif flatness > 0.10:
-        m, decay = 14, 0.65
     else:
-        m, decay = 18, 0.75
+        m, decay = 14, 0.75
 
     return m, decay
 
@@ -318,8 +359,8 @@ def _crossover_wiener(
     post_hp: float,
     src_nyquist: float,
     floor: float = 0.02,
-    frame_ms: float = 50.0,
-    noise_percentile: float = 10.0,
+    frame_ms: float = 30.0,
+    noise_percentile: float = 5.0,
 ) -> np.ndarray:
     is_1d = x.ndim == 1
     x_2d  = x[np.newaxis, :] if is_1d else x
@@ -386,17 +427,17 @@ def _crossover_wiener(
     return out[0] if is_1d else out
 
 # ======== EC-BWE: Envelope Shaping ========
-def _short_term_rms(x: np.ndarray, sr: int, frame_ms: float = 8.0) -> np.ndarray:
+def _short_term_rms(x: np.ndarray, sr: int, frame_ms: float = 4.0) -> np.ndarray:
     frame = max(1, int(sr * frame_ms / 1000))
     x2  = x.astype(np.float64) ** 2
     pad = np.pad(x2, (frame // 2, frame - frame // 2), mode='edge')
     cs  = np.cumsum(pad)
     return np.sqrt(np.maximum((cs[frame:] - cs[:-frame]) / frame, 0.0)).astype(np.float32)
 
-
 def _envelope_shaping(d_res: np.ndarray, x: np.ndarray,
                       sr: int, post_hp: float, src_nyquist: float,
-                      hf_ratio: float) -> np.ndarray:
+                      hf_ratio: float, shaping_strength: float = 0.8,
+                      env_frame_ms: float = 4.0) -> np.ndarray:
     nyq   = sr / 2.0
     ref_lo = np.clip(post_hp      / nyq,        1e-4, 0.999)
     ref_hi = np.clip(src_nyquist  / nyq * 0.97, ref_lo + 1e-4, 0.999)
@@ -411,12 +452,12 @@ def _envelope_shaping(d_res: np.ndarray, x: np.ndarray,
     d_res_2d = d_res[np.newaxis, :] if is_1d else d_res
     out      = np.zeros_like(d_res_2d)
 
-    shaping_strength = float(np.clip(1.0 - hf_ratio * 10.0, 0.3, 1.0))
+    shaping_strength = float(np.clip(0.6 + hf_ratio * 3.0, 0.6, 0.95))
 
     for ch in range(d_res_2d.shape[0]):
         ref_env = _short_term_rms(
-            signal.sosfiltfilt(sos_ref, x_2d[ch]), sr, frame_ms=8.0)
-        gen_env = _short_term_rms(d_res_2d[ch], sr, frame_ms=8.0)
+            signal.sosfiltfilt(sos_ref, x_2d[ch]), sr, frame_ms=env_frame_ms)
+        gen_env = _short_term_rms(d_res_2d[ch], sr, frame_ms=env_frame_ms)
 
         raw_gain = ref_env / (gen_env + 1e-7)
 
@@ -424,7 +465,7 @@ def _envelope_shaping(d_res: np.ndarray, x: np.ndarray,
         pad  = np.pad(raw_gain, (sf_ // 2, sf_ - sf_ // 2), mode='edge')
         cs   = np.cumsum(pad.astype(np.float64))
         gain = ((cs[sf_:] - cs[:-sf_]) / sf_).astype(np.float32)
-        gain = np.clip(gain, 0.0, 3.0)
+        gain = np.clip(gain, 0.0, 2.0)
 
         gain = gain * shaping_strength + 1.0 * (1.0 - shaping_strength)
         out[ch] = (d_res_2d[ch] * gain).astype(np.float32)
@@ -495,7 +536,7 @@ def zansei_impl(
     suppress_mask = np.ones_like(aw)
     mid_idx_lo = np.searchsorted(freqs, 2000)
     mid_idx_hi = np.searchsorted(freqs, 8000)
-    suppress_mask[mid_idx_lo:mid_idx_hi] = 1.0 - aw[mid_idx_lo:mid_idx_hi]
+    suppress_mask[mid_idx_lo:mid_idx_hi] = 1.0 - aw[mid_idx_lo:mid_idx_hi] * 0.7
 
     if x.ndim == 1:
         x_band_limited = np.fft.irfft(np.fft.rfft(x) * suppress_mask, n=x.shape[-1])
@@ -657,8 +698,6 @@ STRINGS = {
         "cancel":       "Cancel",
         "retry":        "Retrying Failed Files",
         "params":       "Output Settings",
-        "m_label":      "Modulation Count:",
-        "decay_label":  "Decay:",
         "sr_label":     "Target Sample Rate:",
         "fmt_label":    "Output Format:",
         "file_prog":    "Current File Progress",
@@ -753,8 +792,6 @@ STRINGS = {
         "cancel":       "변환 취소",
         "retry":        "실패한 파일 재시도",
         "params":       "출력 설정",
-        "m_label":      "변조값:",
-        "decay_label":  "감쇠율:",
         "sr_label":     "목표 샘플링 레이트:",
         "fmt_label":    "출력 인코딩 형식:",
         "file_prog":    "현재 파일 처리 진행률",
@@ -854,9 +891,12 @@ class DSREWorker(QtCore.QThread):
         self.output_dir = output_dir
         self.params = params
         self._abort = False
+        self._current_proc = None
 
     def abort(self):
         self._abort = True
+        if self._current_proc and self._current_proc.poll() is None:
+            self._current_proc.terminate()
 
     def tr(self, key: str) -> str:
         lang = self.params.get('lang', 'en')
@@ -891,7 +931,7 @@ class DSREWorker(QtCore.QThread):
                     y, sr, target_sr,
                         bit_depth=32,
                         quality=8192 if is_upsample else 4096,
-                        bandwidth=0.999  if is_upsample else 0.956,
+                        bandwidth=0.999 if is_upsample else 0.956,
                     )
                 sr = target_sr
 
@@ -910,10 +950,12 @@ class DSREWorker(QtCore.QThread):
                 # Save
                 os.makedirs(self.output_dir, exist_ok=True)
                 base, ext = os.path.splitext(fname)
-
-                out_path = os.path.join(self.output_dir,
-                                        f"{base}.{self.params['format'].lower() if self.params['format'] == 'flac' else 'm4a'}")
-                out_path = save_wav24_out(in_path, y_out, sr, out_path, fmt=self.params['format'])
+                ext = 'flac' if self.params['format'] == 'FLAC' else 'm4a'
+                out_path = os.path.join(self.output_dir, f"{base}.{ext}")
+                if os.path.normcase(os.path.abspath(out_path)) == \
+                   os.path.normcase(os.path.abspath(in_path)):
+                    out_path = os.path.join(self.output_dir, f"{base}_dsre.{ext}")
+                out_path = save_wav24_out(in_path, y_out, sr, out_path, worker=self, fmt=self.params['format'])
 
                 self.sig_log.emit(self.tr("log_saved").format(path=out_path))
                 self.sig_file_done.emit(in_path, out_path)
@@ -921,8 +963,6 @@ class DSREWorker(QtCore.QThread):
             except Exception as e:
                 err = "".join(traceback.format_exception_only(type(e), e)).strip()
                 self.sig_error.emit(fname, err)
-                self.sig_log.emit(
-                    f"[{self.tr('error')}] {fname}: {err}")
 
             done += 1
             self.sig_overall_progress.emit(done, total)
@@ -1190,7 +1230,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_cancel.setText(self.tr("cancel"))
         self.btn_retry.setText(self.tr("retry"))
         self.lbl_now.setText(self.tr("convert"))
-        self.lbl_stats.setText(self.tr("ready"))
         self.btn_dark.setText(
             self.tr("light_mode") if self.dark_mode else self.tr("dark_mode"))
         self.lbl_params.setText(self.tr("params"))
@@ -1540,6 +1579,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_file_progress(self, cur, total, fname):
         self.lbl_now.setText(f"[{cur}/{total}] {fname}")
         self.pb_file.setValue(0)
+        self.statusBar().showMessage(f"[{cur}/{total}] {fname}")
 
     @QtCore.Slot(int, str)
     def on_step_progress(self, pct, fname):
@@ -1550,6 +1590,7 @@ class MainWindow(QtWidgets.QMainWindow):
         pct = int(done * 100 / max(1, total))
         self.pb_all.setValue(pct)
         self.lbl_stats.setText(f"{done}/{total}")
+        self.statusBar().showMessage(f"{done}/{total} ({pct}%)")
 
     @QtCore.Slot(str, str)
     def on_file_done(self, in_path, out_path):
@@ -1588,12 +1629,14 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_cancel(self):
         if self.worker and self.worker.isRunning():
             self.append_log(self.tr("cancelling"))
+            self.statusBar().showMessage(self.tr("cancelling"))
             self.worker.abort()
 
     def on_finished(self):
         self.append_log(self.tr("finished"))
         self.lbl_now.setText(self.tr("convert"))
         self.lbl_stats.setText(self.tr("done"))
+        self.statusBar().showMessage(self.tr("done"))
         self.btn_start.setEnabled(True)
         self.btn_cancel.setEnabled(False)
         self.btn_retry.setEnabled(len(self.failed_files) > 0)
