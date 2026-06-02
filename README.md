@@ -33,7 +33,7 @@ Differences from the origin:
 
 -- There are no parameters. settings are adjusted automatically.
 
--- It incorporates psychoacoustic technology that serves a similar purpose to DSEE HX but uses a different approach. (However, it was causing thread distortion.)
+-- It incorporates psychoacoustic technology that serves a similar purpose to DSEE HX but uses a different approach. (However, it was causing distortion.)
 
 -- Multilingual support for 4 languages.
 
