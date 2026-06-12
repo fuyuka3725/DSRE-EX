@@ -677,6 +677,215 @@ def resample_ardftsrc(
     y_out = result.T.astype(np.float32)
     return y_out[0] if is_1d else y_out
 
+def bde_probe_bit_depth(in_path: str) -> int:
+    SF_SUBTYPE_BITS = {
+        "PCM_S8":  8,  "PCM_U8":  8,
+        "PCM_16": 16,
+        "PCM_24": 24,
+        "PCM_32": 32,
+        "FLOAT":  32,
+        "DOUBLE": 64,
+    }
+    try:
+        info = sf.info(in_path)
+        subtype = info.subtype.upper()
+        for key, bits in SF_SUBTYPE_BITS.items():
+            if subtype.startswith(key):
+                return bits
+    except Exception:
+        pass
+
+    try:
+        cmd = [
+            add_ffmpeg_path("ffprobe.exe"),
+            "-v", "quiet",
+            "-print_format", "json",
+            "-show_streams",
+            in_path,
+        ]
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True,
+            **get_subprocess_kwargs()
+        )
+        if proc.returncode == 0:
+            data = json.loads(proc.stdout)
+            for stream in data.get("streams", []):
+                if stream.get("codec_type") != "audio":
+                    continue
+                bprs = int(stream.get("bits_per_raw_sample", 0) or 0)
+                if bprs >= 16:
+                    return bprs
+                bps = int(stream.get("bits_per_sample", 0) or 0)
+                if bps >= 16:
+                    return bps
+                return 0
+    except Exception:
+        pass
+
+    return 0
+
+# Spectral Detail Synthesis
+def bde_stft(x: np.ndarray, n_fft: int, hop: int) -> np.ndarray:
+    x64 = x.astype(np.float64)
+    window = np.hanning(n_fft).astype(np.float64)
+    n_frames = (len(x64) - n_fft) // hop + 1
+    frames = np.lib.stride_tricks.as_strided(
+        x64,
+        shape=(n_frames, n_fft),
+        strides=(x64.strides[0] * hop, x64.strides[0])
+    ).copy()
+    return np.fft.rfft(frames * window, axis=1).T
+
+def bde_istft(S: np.ndarray, n_fft: int, hop: int, length: int) -> np.ndarray:
+    window   = np.hanning(n_fft).astype(np.float64)
+    win_sq   = window ** 2
+    n_frames = S.shape[1]
+    out      = np.zeros(length + n_fft, dtype=np.float64)
+    win_sum  = np.zeros_like(out)
+    frames    = np.fft.irfft(S.T, n=n_fft, axis=1) * window
+    positions = np.arange(n_frames) * hop
+    for i, pos in enumerate(positions):
+        end = pos + n_fft
+        if end > len(out):
+            end = len(out)
+            out[pos:end]     += frames[i, :end - pos]
+            win_sum[pos:end] += win_sq[:end - pos]
+        else:
+            out[pos:end]     += frames[i]
+            win_sum[pos:end] += win_sq
+    win_sum = np.maximum(win_sum, 1e-8)
+    return (out / win_sum)[:length].astype(np.float32)
+
+def bde_detect_smearing(
+    mag: np.ndarray,
+    freqs: np.ndarray,
+    sr: int,
+    cutoff_hz: float,
+) -> np.ndarray:
+    cutoff_idx = int(np.searchsorted(freqs, cutoff_hz))
+    if cutoff_idx < 8:
+        return np.zeros(len(freqs), dtype=np.float32)
+    mag_band = mag[:cutoff_idx]
+    mean_mag = np.mean(mag_band, axis=1) + 1e-12
+    diff      = np.abs(np.diff(mean_mag, prepend=mean_mag[1]))
+    diff_norm = diff / (np.max(diff) + 1e-12)
+    freq_weight = np.clip((freqs[:cutoff_idx] - 1000.0) / 4000.0, 0.0, 1.0)
+    smear = (1.0 - diff_norm) * freq_weight
+    mask = np.zeros(len(freqs), dtype=np.float32)
+    mask[:cutoff_idx] = smear.astype(np.float32)
+    return mask
+
+def bde_harmonic_profile(
+    mag: np.ndarray,
+    freqs: np.ndarray,
+    sr: int,
+) -> np.ndarray:
+    if mag.ndim == 1:
+        mean_mag = mag.astype(np.float64) + 1e-12
+    else:
+        mean_mag = np.mean(mag, axis=1).astype(np.float64) + 1e-12
+    log_mag = np.log(mean_mag)
+    n_cep    = (len(log_mag) - 1) * 2
+    cepstrum = np.fft.irfft(log_mag, n=n_cep)
+    lifter   = np.zeros(n_cep, dtype=np.float64)
+    cutoff_q = max(4, n_cep // 32)
+    lifter[:cutoff_q]  = 1.0
+    lifter[-cutoff_q:] = 1.0
+    envelope = np.exp(np.real(np.fft.rfft(lifter * cepstrum))[:len(mean_mag)])
+    envelope = np.maximum(envelope, 1e-12)
+    harmonic_structure  = mean_mag / envelope
+    harmonic_structure /= (harmonic_structure.max() + 1e-12)
+    return harmonic_structure.astype(np.float32)
+
+def bde_subband_detail_synth(
+    S: np.ndarray,
+    mag: np.ndarray,
+    phase: np.ndarray,
+    freqs: np.ndarray,
+    smear_mask: np.ndarray,
+    harmonic_profile: np.ndarray,
+    cutoff_idx: int,
+    strength: float,
+) -> np.ndarray:
+    from scipy.ndimage import uniform_filter1d
+    S_out = S.copy()
+    if cutoff_idx < 2:
+        return S_out
+    mag_band   = mag[:cutoff_idx]
+    phase_band = phase[:cutoff_idx]
+    neighbor_amp = uniform_filter1d(
+        mag_band, size=7, axis=0, mode='nearest') + 1e-12
+    h_prof = harmonic_profile[:cutoff_idx, np.newaxis]
+    smear  = smear_mask[:cutoff_idx, np.newaxis]
+    target_amp = neighbor_amp * h_prof
+    active = (smear_mask[:cutoff_idx] >= 0.05)[:, np.newaxis]
+    correction = (target_amp - mag_band) * smear * strength * active
+    max_corr   = mag_band * 0.5
+    correction = np.clip(correction, -max_corr, max_corr)
+    new_amp = np.maximum(mag_band + correction, 0.0)
+    S_out[:cutoff_idx] = new_amp * np.exp(1j * phase_band)
+    return S_out
+
+def bde_spectral_detail_synth(
+    y: np.ndarray,
+    sr: int,
+    cutoff_hz: float,
+    strength: float = 0.16,
+) -> np.ndarray:
+    is_1d = y.ndim == 1
+    y_2d  = y[np.newaxis, :] if is_1d else y.copy()
+    n_ch, n_samples = y_2d.shape
+    n_fft      = max(512, 2 ** int(np.ceil(np.log2(sr * 0.023))))
+    hop        = n_fft // 4
+    freqs      = np.fft.rfftfreq(n_fft, 1.0 / sr)
+    cutoff_idx = int(np.searchsorted(freqs, cutoff_hz))
+    fade_lo   = max(0, int(np.searchsorted(freqs, cutoff_hz - 500.0)))
+    fade_hi   = min(len(freqs), int(np.searchsorted(freqs, cutoff_hz + 500.0)))
+    fade_len  = max(1, fade_hi - fade_lo)
+    fade_curve = np.linspace(1.0, 0.0, fade_len, dtype=np.float32)
+    y_out = np.zeros_like(y_2d)
+    for ch in range(n_ch):
+        sig   = y_2d[ch].astype(np.float64)
+        S     = bde_stft(sig, n_fft, hop)
+        mag   = np.abs(S).astype(np.float64)
+        phase = np.angle(S).astype(np.float64)
+        smear  = bde_detect_smearing(mag, freqs, sr, cutoff_hz)
+        h_prof = bde_harmonic_profile(mag[:cutoff_idx + 1], freqs[:cutoff_idx + 1], sr)
+        h_prof_full = np.zeros(len(freqs), dtype=np.float32)
+        h_prof_full[:len(h_prof)] = h_prof
+        S_synth   = bde_subband_detail_synth(
+            S, mag, phase, freqs,
+            smear, h_prof_full,
+            cutoff_idx, strength,
+        )
+        S_blended = S_synth.copy()
+        S_blended[fade_lo:fade_hi] = (
+            S_synth[fade_lo:fade_hi] * fade_curve[:, np.newaxis]
+            + S[fade_lo:fade_hi]     * (1.0 - fade_curve[:, np.newaxis])
+        )
+        S_blended[fade_hi:] = S[fade_hi:]
+        y_out[ch] = bde_istft(S_blended, n_fft, hop, n_samples)
+    return y_out[0] if is_1d else y_out
+
+# Anti-Staircase
+def bde_time_domain(y: np.ndarray, sr: int) -> np.ndarray:
+    from scipy.signal import butter, lfilter
+    GATE_THRESH = 1e-3
+    BLEND_COEFF = 0.2
+    b, a = butter(2, 0.9, btype='low')
+    is_1d = y.ndim == 1
+    y_2d  = y[np.newaxis, :] if is_1d else y.copy()
+    n_ch, n_samples = y_2d.shape
+    y_out = np.empty_like(y_2d)
+    for ch in range(n_ch):
+        sig      = y_2d[ch].astype(np.float64)
+        y_smooth = lfilter(b, a, sig)
+        abs_sig  = np.abs(sig)
+        env      = lfilter([0.01], [1.0, -0.99], abs_sig)
+        gate     = np.clip((GATE_THRESH - env) / GATE_THRESH, 0.0, 1.0)
+        y_out[ch] = (sig + (y_smooth - sig) * gate * BLEND_COEFF).astype(np.float32)
+    return y_out[0] if is_1d else y_out
+
 # ======== Language Strings ========
 STRINGS = {
     "en": {
@@ -717,7 +926,7 @@ STRINGS = {
         "preparing":   "Preparing {n} files",
         "retrying":          "Retrying",
         "cancelling":        "Conversion Canceling",
-        "finished":          "The conversion is complete.",
+        "finished":          "Working is complete.",
         "done":              "Complete",
         "error":             "Error",
         "log_loading": "Loading…: {path}",
@@ -764,7 +973,7 @@ STRINGS = {
         "preparing":     "{n}個のファイルを変換する準備中",
         "retrying":          "再試行中",
         "cancelling":        "変換キャンセル中",
-        "finished":          "変換が完了いたしました。",
+        "finished":          "作業が完了いたしました。",
         "done":              "完了",
         "error":             "エラー",
         "log_loading": "読み込み中: {path}",
@@ -811,7 +1020,7 @@ STRINGS = {
         "preparing":     "{n}개의 파일을 변환할 준비 중",
         "retrying":          "재시도 중",
         "cancelling":        "변환 취소 중",
-        "finished":          "변환이 완료되었습니다.",
+        "finished":          "작업이 완료되었습니다.",
         "done":              "완료",
         "error":             "오류",
         "log_loading": "불러오는 중: {path}",
@@ -858,7 +1067,7 @@ STRINGS = {
         "preparing":     "转换准备转换{n}个文件",
         "retrying":          "转换重试",
         "cancelling":        "转换撤销转换",
-        "finished":          "转换已完成。",
+        "finished":          "操作已完成。",
         "done":              "完成",
         "error":             "错误",
         "log_loading": "正在加载: {path}",
@@ -912,11 +1121,21 @@ class DSREWorker(QtCore.QThread):
             try:
                 # Load
                 self.sig_log.emit(self.tr("log_loading").format(path=in_path))
+
+                # Bit_depth Check
+                src_bit_depth = bde_probe_bit_depth(in_path)
+                bde_bypass = src_bit_depth >= 24
+
                 y, sr = load_audio(in_path)
 
                 # Sort by (ch, n)
                 if y.ndim == 1:
                     y = y[np.newaxis, :]
+
+                # Anti-staircase
+                if not bde_bypass:
+                    y = bde_time_domain(y, sr)
+
                 # Resample
                 target_sr = int(self.params["target_sr"])
                 is_upsample = target_sr > sr
@@ -930,6 +1149,10 @@ class DSREWorker(QtCore.QThread):
                 sr = target_sr
 
                 # Processing
+                if not bde_bypass:
+                    pre_hp, _ = auto_hp_params(y, src_sr)
+                    y = bde_spectral_detail_synth(y, sr, cutoff_hz=pre_hp)
+
                 def step_cb(cur, m):
                     pct = int(cur * 100 / max(1, m))
                     self.sig_step_progress.emit(pct, fname)
@@ -940,6 +1163,9 @@ class DSREWorker(QtCore.QThread):
                     progress_cb=step_cb,
                     abort_cb=lambda: self._abort
                 )
+
+                if self._abort:
+                    break
 
                 # Save
                 os.makedirs(self.output_dir, exist_ok=True)
