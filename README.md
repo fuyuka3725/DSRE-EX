@@ -52,9 +52,9 @@ This fork was created to maintain the discontinued Ver 3.x. You can view the cha
 
 4. Test `python DSRE.py`
 
-5. build `pyinstaller --onefile --windowed --add-data "logo.ico;." --add-binary "ffmpeg.exe;." --icon=logo.ico --name=DSRE DSRE.py`
+5. build `pyinstaller --onefile --windowed --add-data "logo.ico;." --add-binary "ffmpeg.exe;." --add-binary "ffprobe.exe;." --icon=logo.ico --name=DSRE DSRE.py`
 
-※ To run and build this, you'll need ffmpeg.exe, which must be located in the same directory as the .py file.
+※ To run and build this, you'll need ffmpeg.exe and ffprobe.exe, which must be located in the same directory as the .py file.
 
 ## TODO
 
