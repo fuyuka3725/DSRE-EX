@@ -347,7 +347,7 @@ def auto_zansei_params(y: np.ndarray, sr: int, pre_hp: float, post_hp: float):
 
     return m, decay
 
-def _crossover_wiener(
+def crossover_wiener(
     x: np.ndarray,
     sr: int,
     post_hp: float,
@@ -421,14 +421,14 @@ def _crossover_wiener(
     return out[0] if is_1d else out
 
 # ======== EC-BWE: Envelope Shaping ========
-def _short_term_rms(x: np.ndarray, sr: int, frame_ms: float = 4.0) -> np.ndarray:
+def lpc_short_term_rms(x: np.ndarray, sr: int, frame_ms: float = 4.0) -> np.ndarray:
     frame = max(1, int(sr * frame_ms / 1000))
     x2  = x.astype(np.float64) ** 2
     pad = np.pad(x2, (frame // 2, frame - frame // 2), mode='edge')
     cs  = np.cumsum(pad)
     return np.sqrt(np.maximum((cs[frame:] - cs[:-frame]) / frame, 0.0)).astype(np.float32)
 
-def _envelope_shaping(d_res: np.ndarray, x: np.ndarray,
+def envelope_shaping(d_res: np.ndarray, x: np.ndarray,
                       sr: int, post_hp: float, src_nyquist: float,
                       hf_ratio: float, shaping_strength: float = 0.8,
                       env_frame_ms: float = 4.0) -> np.ndarray:
@@ -449,9 +449,9 @@ def _envelope_shaping(d_res: np.ndarray, x: np.ndarray,
     shaping_strength = float(np.clip(0.6 + hf_ratio * 3.0, 0.6, 0.95))
 
     for ch in range(d_res_2d.shape[0]):
-        ref_env = _short_term_rms(
+        ref_env = lpc_short_term_rms(
             signal.sosfiltfilt(sos_ref, x_2d[ch]), sr, frame_ms=env_frame_ms)
-        gen_env = _short_term_rms(d_res_2d[ch], sr, frame_ms=env_frame_ms)
+        gen_env = lpc_short_term_rms(d_res_2d[ch], sr, frame_ms=env_frame_ms)
 
         raw_gain = ref_env / (gen_env + 1e-7)
 
@@ -485,7 +485,7 @@ def zansei_impl(
     # Pre-processing HPF
     sos = signal.butter(9, pre_hp / (sr / 2), 'highpass', output='sos')
     d_src = signal.sosfiltfilt(sos, x)
-    d_src = _crossover_wiener(d_src, sr, post_hp, analysis_sr / 2.0, floor=0.02)
+    d_src = crossover_wiener(d_src, sr, post_hp, analysis_sr / 2.0, floor=0.02)
 
     d_sr = 1.0 / sr
     f_dn = freq_shift_mono if (x.ndim == 1) else freq_shift_multi
@@ -552,7 +552,7 @@ def zansei_impl(
     adj_factor = min(adj_factor, 0.5)
 
     src_nyquist = analysis_sr / 2.0
-    d_res_masked = _envelope_shaping(
+    d_res_masked = envelope_shaping(
         d_res_masked, x, sr, post_hp, src_nyquist, hf_ratio)
 
     y = x + d_res_masked * adj_factor
