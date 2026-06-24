@@ -58,6 +58,8 @@ This fork was created to maintain the discontinued Ver 3.x. You can view the cha
 
 ## TODO
 
+- [ ] Support for Multithreading and Parallel Processing Implementation.
+
 - [ ] Imports a MacOS GUI from [CrossDarkrix/DSRE-Audio-Enhancer](https://github.com/CrossDarkrix/DSRE-Audio-Enhancer).
 
 ## Credits
