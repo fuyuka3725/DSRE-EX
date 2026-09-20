@@ -7,6 +7,8 @@ import subprocess
 import soundfile as sf
 import tempfile
 import json
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, Future
 
 import numpy as np
 from scipy import signal
@@ -35,7 +37,21 @@ def add_ffmpeg_path(relative: str) -> str:
     return os.path.join(base, relative)
 
 add_ffmpeg_path("ffmpeg.exe")
-def cmdrun(cmd, worker=None, **kw):
+
+# ======== Per-process abort event ========
+_abort_event: Optional[multiprocessing.Event] = None
+_progress_queue: Optional["multiprocessing.Queue"] = None
+
+def _worker_init(abort_event: multiprocessing.Event,
+                  progress_queue: "multiprocessing.Queue") -> None:
+    global _abort_event, _progress_queue
+    _abort_event = abort_event
+    _progress_queue = progress_queue
+
+def _is_aborted() -> bool:
+    return _abort_event is not None and _abort_event.is_set()
+
+def cmdrun(cmd, proc_registry=None, **kw):
     stdout = kw.pop("stdout", None)
     stderr = kw.pop("stderr", None)
     check  = kw.pop("check", False)
@@ -52,13 +68,13 @@ def cmdrun(cmd, worker=None, **kw):
         **kw
     )
 
-    if worker is not None:
-        worker._current_proc = proc
+    if proc_registry is not None:
+        proc_registry.append(proc)
 
     returncode = proc.wait()
 
-    if worker is not None:
-        worker._current_proc = None
+    if proc_registry is not None and proc in proc_registry:
+        proc_registry.remove(proc)
 
     if check and returncode != 0:
         raise subprocess.CalledProcessError(returncode, cmd)
@@ -73,7 +89,19 @@ def lossless_headroom(data, drive=0.9, target_peak_db=-0.5):
     data = data * target_peak_linear
     return data
 
-def save_wav24_out(in_path, y_out, sr, out_path, worker=None, fmt="FLAC"):
+def tpdf_dither(data: np.ndarray) -> np.ndarray:
+    rng = np.random.default_rng()
+    full_scale = 32767.0
+    dither = (rng.uniform(-0.5, 0.5, size=data.shape) +
+              rng.uniform(-0.5, 0.5, size=data.shape))
+    scaled = data.astype(np.float64) * full_scale
+    dithered = scaled + dither
+    quantized = np.round(dithered)
+    quantized = np.clip(quantized, -32768, 32767)
+    return quantized.astype(np.int16)
+
+
+def save_wav24_out(in_path, y_out, sr, out_path, proc_registry=None, fmt="FLAC", bit_depth=24):
     import tempfile, subprocess, numpy as np, soundfile as sf, os
 
     # Check shape = (n, ch)
@@ -87,13 +115,21 @@ def save_wav24_out(in_path, y_out, sr, out_path, worker=None, fmt="FLAC"):
 
     tmp_wav = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
     tmp_wav.close()
-    sf.write(tmp_wav.name, data, sr, subtype="FLOAT")
+
+    if bit_depth == 16:
+        data_16 = tpdf_dither(data)
+        sf.write(tmp_wav.name, data_16, sr, subtype="PCM_16")
+    else:
+        sf.write(tmp_wav.name, data, sr, subtype="FLOAT")
 
     fmt = fmt.upper()
     out_path = os.path.splitext(out_path)[0] + (".m4a" if fmt == "ALAC" else ".flac")
 
     codec_map = {"FLAC": "flac", "ALAC": "alac"}
-    sample_fmt_map = {"FLAC": "s32", "ALAC": "s32p"}
+    if bit_depth == 16:
+        sample_fmt_map = {"FLAC": "s16", "ALAC": "s16p"}
+    else:
+        sample_fmt_map = {"FLAC": "s32", "ALAC": "s32p"}
 
     if fmt == "ALAC":
         cmd = [
@@ -115,7 +151,8 @@ def save_wav24_out(in_path, y_out, sr, out_path, worker=None, fmt="FLAC"):
             cover_tmp.close()
             cmdrun(
                 ["ffmpeg.exe", "-y", "-i", in_path, "-an", "-c:v", "copy", cover_tmp.name],
-                worker=worker, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                proc_registry=proc_registry, check=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
         except Exception:
             cover_tmp = None
@@ -147,7 +184,7 @@ def save_wav24_out(in_path, y_out, sr, out_path, worker=None, fmt="FLAC"):
                 out_path
             ]
 
-    cmdrun(cmd, worker=worker, check=True)
+    cmdrun(cmd, proc_registry=proc_registry, check=True)
     os.remove(tmp_wav.name)
     if fmt == "FLAC" and cover_tmp and os.path.exists(cover_tmp.name):
         os.remove(cover_tmp.name)
@@ -169,6 +206,7 @@ def load_audio(in_path: str):
             [add_ffmpeg_path("ffmpeg.exe"), "-y", "-i", in_path,
              "-f", "wav", "-acodec", "pcm_f32le", tmp_wav],
             check=True, capture_output=True,
+            text=True, encoding="utf-8", errors="replace",
         )
         y, sr = sf.read(tmp_wav, always_2d=True)
         return y.T.astype(np.float32), sr
@@ -430,7 +468,7 @@ def lpc_short_term_rms(x: np.ndarray, sr: int, frame_ms: float = 4.0) -> np.ndar
 
 def envelope_shaping(d_res: np.ndarray, x: np.ndarray,
                       sr: int, post_hp: float, src_nyquist: float,
-                      hf_ratio: float, shaping_strength: float = 0.8,
+                      hf_ratio: float,
                       env_frame_ms: float = 4.0) -> np.ndarray:
     nyq   = sr / 2.0
     ref_lo = np.clip(post_hp      / nyq,        1e-4, 0.999)
@@ -553,7 +591,7 @@ def zansei_impl(
 
     src_nyquist = analysis_sr / 2.0
     d_res_masked = envelope_shaping(
-        d_res_masked, x, sr, post_hp, src_nyquist, hf_ratio)
+        d_res_masked, x_band_limited, sr, post_hp, src_nyquist, hf_ratio)
 
     y = x + d_res_masked * adj_factor
     return y
@@ -705,6 +743,7 @@ def bde_probe_bit_depth(in_path: str) -> int:
         ]
         proc = subprocess.run(
             cmd, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
             **get_subprocess_kwargs()
         )
         if proc.returncode == 0:
@@ -903,6 +942,7 @@ STRINGS = {
         "params":       "Output Settings",
         "sr_label":     "Target Sample Rate:",
         "fmt_label":    "Output Format:",
+        "bit_depth_label": "Bit Depth:",
         "file_prog":    "Current File Progress",
         "all_prog":     "Overall Progress",
         "log":          "Log",
@@ -950,6 +990,7 @@ STRINGS = {
         "params":       "出力設定",
         "sr_label":     "目標サンプリングレート:",
         "fmt_label":    "出力エンコード形式:",
+        "bit_depth_label": "ビット深度:",
         "file_prog":    "現在のファイル進捗",
         "all_prog":     "全体進捗",
         "log":          "ログ",
@@ -997,6 +1038,7 @@ STRINGS = {
         "params":       "출력 설정",
         "sr_label":     "목표 샘플링 레이트:",
         "fmt_label":    "출력 인코딩 형식:",
+        "bit_depth_label": "비트 뎁스:",
         "file_prog":    "현재 파일 처리 진행률",
         "all_prog":     "전체 파일 처리 진행률",
         "log":          "로그",
@@ -1044,6 +1086,7 @@ STRINGS = {
         "params":       "输出设置",
         "sr_label":     "目标采样率:",
         "fmt_label":    "输出编码格式:",
+        "bit_depth_label": "位深度:",
         "file_prog":    "当前文件进度",
         "all_prog":     "整体进度",
         "log":          "日志",
@@ -1078,115 +1121,248 @@ STRINGS = {
     },
 }
 
+# ======== Per-file Processing ========
+_STEP_WEIGHTS = {
+    "load":    5,
+    "stair":  10,
+    "resamp": 30,
+    "detail": 15,
+    "zansei": 35,
+    "save":    5,
+}
+
+class _AbortedError(Exception):
+    pass
+
+
+def process_one_file(
+    in_path: str,
+    output_dir: str,
+    params: dict,
+) -> None:
+    progress_queue = _progress_queue
+    proc_registry: list = []
+
+    def _check_abort():
+        if _is_aborted():
+            for p in list(proc_registry):
+                try:
+                    p.terminate()
+                except Exception:
+                    pass
+            raise _AbortedError()
+
+    def _push_step(step_name: str, bde_bypass: bool, extra_pct: float = 0.0):
+        steps_done = list(_STEP_WEIGHTS.keys())
+        idx = steps_done.index(step_name)
+        active = {
+            k: v for k, v in _STEP_WEIGHTS.items()
+            if not (bde_bypass and k in ("stair", "detail"))
+        }
+        keys = list(active.keys())
+        done_weight = sum(active[k] for k in keys if keys.index(k) < keys.index(step_name))
+        done_weight += active.get(step_name, 0) * extra_pct
+        total_weight = sum(active.values())
+        pct = int(done_weight * 100 / max(1, total_weight))
+        progress_queue.put({"kind": "step", "in_path": in_path, "pct": pct})
+
+    try:
+        fname = os.path.basename(in_path)
+
+        _check_abort()
+        progress_queue.put({"kind": "log", "in_path": in_path,
+                             "log_key": "log_loading", "path": fname})
+        src_bit_depth = bde_probe_bit_depth(in_path)
+        bde_bypass = src_bit_depth >= 24
+        y, sr = load_audio(in_path)
+        if y.ndim == 1:
+            y = y[np.newaxis, :]
+        _push_step("load", bde_bypass, extra_pct=1.0)
+
+        _check_abort()
+        if not bde_bypass:
+            y = bde_time_domain(y, sr)
+        _push_step("stair", bde_bypass, extra_pct=1.0)
+
+        _check_abort()
+        target_sr = int(params["target_sr"])
+        is_upsample = target_sr > sr
+        src_sr = sr
+        y = resample_ardftsrc(
+            y, sr, target_sr,
+            bit_depth=32,
+            quality=8192 if is_upsample else 4096,
+            bandwidth=0.999 if is_upsample else 0.956,
+        )
+        sr = target_sr
+        _push_step("resamp", bde_bypass, extra_pct=1.0)
+
+        _check_abort()
+        if not bde_bypass:
+            pre_hp, _ = auto_hp_params(y, src_sr)
+            y = bde_spectral_detail_synth(y, sr, cutoff_hz=pre_hp)
+        _push_step("detail", bde_bypass, extra_pct=1.0)
+
+        _check_abort()
+
+        def _zansei_progress_cb(cur: int, m: int):
+            _push_step("zansei", bde_bypass, extra_pct=cur / max(1, m))
+
+        y_out = zansei_impl(
+            y, sr,
+            src_sr=src_sr,
+            progress_cb=_zansei_progress_cb,
+            abort_cb=_is_aborted,
+        )
+        _push_step("zansei", bde_bypass, extra_pct=1.0)
+
+        _check_abort()
+        os.makedirs(output_dir, exist_ok=True)
+        base, _ = os.path.splitext(fname)
+        ext = 'flac' if params['format'] == 'FLAC' else 'm4a'
+        out_path = os.path.join(output_dir, f"{base}.{ext}")
+        if os.path.normcase(os.path.abspath(out_path)) == \
+           os.path.normcase(os.path.abspath(in_path)):
+            out_path = os.path.join(output_dir, f"{base}_dsre.{ext}")
+
+        out_path = save_wav24_out(
+            in_path, y_out, sr, out_path,
+            proc_registry=proc_registry,
+            fmt=params['format'],
+            bit_depth=params.get('bit_depth', 24),
+        )
+        _push_step("save", bde_bypass, extra_pct=1.0)
+
+        progress_queue.put({"kind": "done", "in_path": in_path, "out_path": out_path})
+
+    except _AbortedError:
+        progress_queue.put({"kind": "abort", "in_path": in_path})
+
+    except Exception as e:
+        err = "".join(traceback.format_exception_only(type(e), e)).strip()
+        progress_queue.put({"kind": "error", "in_path": in_path, "error": err})
+
+
 # ======== Background Work Thread ========
 class DSREWorker(QtCore.QThread):
-    sig_log = QtCore.Signal(str)                         # log
-    sig_file_progress = QtCore.Signal(int, int, str)     # current, total, filename
-    sig_step_progress = QtCore.Signal(int, str)          # step progress (0~100)
-    sig_overall_progress = QtCore.Signal(int, int)       # done, total
-    sig_file_done = QtCore.Signal(str, str)              # in_path, out_path
-    sig_error = QtCore.Signal(str, str)
-    sig_finished = QtCore.Signal()
+    sig_log              = QtCore.Signal(str)
+    sig_overall_progress = QtCore.Signal(int, int)
+    sig_file_progress    = QtCore.Signal(int, str)
+    sig_file_done        = QtCore.Signal(str, str)
+    sig_error            = QtCore.Signal(str, str)
+    sig_finished         = QtCore.Signal()
+
+    _POLL_MS = 80
 
     def __init__(self, files, output_dir, params, parent=None):
         super().__init__(parent)
-        self.files = files
+        self.files      = files
         self.output_dir = output_dir
-        self.params = params
-        self._abort = False
-        self._current_proc = None
+        self.params     = params
+        self._abort_event = multiprocessing.Event()
+        self._executor: Optional[ProcessPoolExecutor] = None
 
     def abort(self):
-        self._abort = True
-        if self._current_proc and self._current_proc.poll() is None:
-            self._current_proc.terminate()
+        self._abort_event.set()
+        if self._executor is not None:
+            self._executor.shutdown(wait=False, cancel_futures=True)
 
     def tr(self, key: str) -> str:
         lang = self.params.get('lang', 'en')
         return STRINGS.get(lang, STRINGS["en"]).get(key, key)
 
     def run(self):
+        import queue as _queue
+
         total = len(self.files)
-        done = 0
+        done  = 0
         self.sig_overall_progress.emit(done, total)
 
-        for idx, in_path in enumerate(self.files, start=1):
-            if self._abort:
-                break
+        file_pct: dict[str, int] = {fp: 0 for fp in self.files}
+        active_files: set = set(self.files)
 
-            fname = os.path.basename(in_path)
-            self.sig_file_progress.emit(idx, total, fname)
-            self.sig_step_progress.emit(0, fname)
+        progress_queue: multiprocessing.Queue = multiprocessing.Queue()
 
-            try:
-                # Load
-                self.sig_log.emit(self.tr("log_loading").format(path=in_path))
+        max_workers = min(total, max(1, (os.cpu_count() or 2) - 1))
 
-                # Bit_depth Check
-                src_bit_depth = bde_probe_bit_depth(in_path)
-                bde_bypass = src_bit_depth >= 24
+        with ProcessPoolExecutor(
+            max_workers=max_workers,
+            initializer=_worker_init,
+            initargs=(self._abort_event, progress_queue),
+        ) as executor:
+            self._executor = executor
 
-                y, sr = load_audio(in_path)
+            futures = [
+                executor.submit(process_one_file, fp, self.output_dir,
+                                self.params)
+                for fp in self.files
+            ]
+            pending = set(futures)
 
-                # Sort by (ch, n)
-                if y.ndim == 1:
-                    y = y[np.newaxis, :]
+            def _emit_file_progress():
+                if not active_files:
+                    return
+                avg = int(sum(file_pct[fp] for fp in active_files) / len(active_files))
+                names = ", ".join(os.path.basename(fp) for fp in sorted(active_files))
+                self.sig_file_progress.emit(avg, names)
 
-                # Anti-staircase
-                if not bde_bypass:
-                    y = bde_time_domain(y, sr)
+            while pending:
+                finished = {f for f in pending if f.done()}
+                for f in finished:
+                    pending.discard(f)
+                    try:
+                        f.result()  # re-raises here if an exception occurred
+                    except Exception as e:
+                        err = "".join(traceback.format_exception_only(type(e), e)).strip()
+                        self.sig_log.emit(f"[internal error] {err}")
 
-                # Resample
-                target_sr = int(self.params["target_sr"])
-                is_upsample = target_sr > sr
-                src_sr = sr
-                y = resample_ardftsrc(
-                    y, sr, target_sr,
-                        bit_depth=32,
-                        quality=8192 if is_upsample else 4096,
-                        bandwidth=0.999 if is_upsample else 0.956,
-                    )
-                sr = target_sr
+                drained = False
+                while not drained:
+                    try:
+                        msg = progress_queue.get_nowait()
+                    except _queue.Empty:
+                        drained = True
+                        continue
 
-                # Processing
-                if not bde_bypass:
-                    pre_hp, _ = auto_hp_params(y, src_sr)
-                    y = bde_spectral_detail_synth(y, sr, cutoff_hz=pre_hp)
+                    kind    = msg["kind"]
+                    in_path = msg["in_path"]
+                    fname   = os.path.basename(in_path)
 
-                def step_cb(cur, m):
-                    pct = int(cur * 100 / max(1, m))
-                    self.sig_step_progress.emit(pct, fname)
+                    if kind == "step":
+                        file_pct[in_path] = msg["pct"]
+                        _emit_file_progress()
 
-                y_out = zansei_impl(
-                    y, sr,
-                    src_sr=src_sr,
-                    progress_cb=step_cb,
-                    abort_cb=lambda: self._abort
-                )
+                    elif kind == "log":
+                        text = self.tr(msg["log_key"]).format(path=msg["path"])
+                        self.sig_log.emit(text)
 
-                if self._abort:
+                    elif kind == "done":
+                        file_pct[in_path] = 100
+                        active_files.discard(in_path)
+                        done += 1
+                        self.sig_overall_progress.emit(done, total)
+                        self.sig_file_done.emit(in_path, msg["out_path"])
+                        _emit_file_progress()
+
+                    elif kind == "error":
+                        active_files.discard(in_path)
+                        done += 1
+                        self.sig_overall_progress.emit(done, total)
+                        self.sig_error.emit(fname, msg["error"])
+                        _emit_file_progress()
+
+                    elif kind == "abort":
+                        active_files.discard(in_path)
+                        done += 1
+                        self.sig_overall_progress.emit(done, total)
+                        _emit_file_progress()
+
+                if self._abort_event.is_set() and not pending:
                     break
 
-                # Save
-                os.makedirs(self.output_dir, exist_ok=True)
-                base, ext = os.path.splitext(fname)
-                ext = 'flac' if self.params['format'] == 'FLAC' else 'm4a'
-                out_path = os.path.join(self.output_dir, f"{base}.{ext}")
-                if os.path.normcase(os.path.abspath(out_path)) == \
-                   os.path.normcase(os.path.abspath(in_path)):
-                    out_path = os.path.join(self.output_dir, f"{base}_dsre.{ext}")
-                out_path = save_wav24_out(in_path, y_out, sr, out_path, worker=self, fmt=self.params['format'])
+                self.msleep(self._POLL_MS)
 
-                self.sig_log.emit(self.tr("log_saved").format(path=out_path))
-                self.sig_file_done.emit(in_path, out_path)
-
-            except Exception as e:
-                err = "".join(traceback.format_exception_only(type(e), e)).strip()
-                self.sig_error.emit(fname, err)
-
-            done += 1
-            self.sig_overall_progress.emit(done, total)
-            self.sig_step_progress.emit(100, fname)
+            self._executor = None
 
         self.sig_finished.emit()
 
@@ -1256,6 +1432,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.le_outdir           = QtWidgets.QLineEdit()
         self.le_outdir.setPlaceholderText(self.tr("output_placeholder"))
         self.le_outdir.setText(os.path.abspath("output"))
+
+        self.cb_bit_depth = QtWidgets.QComboBox()
+        self.cb_bit_depth.addItem("24-Bit", userData=24)
+        self.cb_bit_depth.addItem("16-Bit", userData=16)
 
         self.cb_sr = QtWidgets.QComboBox()
         for sr_val in [44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000]:
@@ -1347,8 +1527,10 @@ class MainWindow(QtWidgets.QMainWindow):
         right_layout.addWidget(self.lbl_params)
 
         form = QtWidgets.QFormLayout()
+        self.lbl_bit_depth = QtWidgets.QLabel(self.tr("bit_depth_label"))
         self.lbl_sr    = QtWidgets.QLabel(self.tr("sr_label"))
         self.lbl_fmt   = QtWidgets.QLabel(self.tr("fmt_label"))
+        form.addRow(self.lbl_bit_depth, self.cb_bit_depth)
         form.addRow(self.lbl_sr,    self.cb_sr)
         form.addRow(self.lbl_fmt,   self.cb_format)
         right_layout.addLayout(form)
@@ -1417,6 +1599,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cb_sr.currentIndexChanged.connect(self.save_config)
         self.le_outdir.textChanged.connect(self.save_config)
         self.cb_format.currentTextChanged.connect(self.save_config)
+        self.cb_bit_depth.currentIndexChanged.connect(self.save_config)
 
         # Menu Bar / Status Bar
         self.create_menu_bar()
@@ -1455,6 +1638,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_params.setText(self.tr("params"))
         self.lbl_sr.setText(self.tr("sr_label"))
         self.lbl_fmt.setText(self.tr("fmt_label"))
+        self.lbl_bit_depth.setText(self.tr("bit_depth_label"))
         self.lbl_lang.setText(self.tr("lang_label"))
         self.lbl_file_prog.setText(self.tr("file_prog"))
         self.lbl_all_prog.setText(self.tr("all_prog"))
@@ -1664,7 +1848,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.le_outdir.setText(d)
 
     def load_config(self):
-        for widget in [self.cb_sr, self.le_outdir, self.cb_format, self.cb_lang]:
+        for widget in [self.cb_sr, self.le_outdir, self.cb_format, self.cb_bit_depth, self.cb_lang]:
             widget.blockSignals(True)
         try:
             if os.path.exists(self.config_file):
@@ -1682,6 +1866,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 fmt_map = {'FLAC': 0, 'ALAC': 1}
                 self.cb_format.setCurrentIndex(
                     fmt_map.get(config.get('format', 'FLAC'), 0))
+                bit_depth = config.get('bit_depth', 24)
+                for i in range(self.cb_bit_depth.count()):
+                    if self.cb_bit_depth.itemData(i) == bit_depth:
+                        self.cb_bit_depth.setCurrentIndex(i)
+                        break
                 self.recent_files = config.get('recent_files', [])
                 self.dark_mode = config.get('dark_mode', True)
                 self.btn_dark.setText(
@@ -1699,7 +1888,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.append_log(f"設定の保存に失敗: {e}")
 
         finally:
-            for widget in [self.cb_sr, self.le_outdir, self.cb_format, self.cb_lang]:
+            for widget in [self.cb_sr, self.le_outdir, self.cb_format, self.cb_bit_depth, self.cb_lang]:
                 widget.blockSignals(False)
 
     def save_config(self):
@@ -1708,6 +1897,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 'target_sr':    self.cb_sr.currentData(),
                 'output_dir':   self.le_outdir.text(),
                 'format':       self.cb_format.currentText(),
+                'bit_depth':    self.cb_bit_depth.currentData(),
                 'recent_files': self.recent_files,
                 'dark_mode':    self.dark_mode,
                 'lang':         self.lang,
@@ -1754,7 +1944,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def params(self):
         return dict(
             target_sr=self.cb_sr.currentData(),
-            bit_depth=24,
+            bit_depth=self.cb_bit_depth.currentData(),
             format=self.cb_format.currentText(),
             lang=self.lang,
         )
@@ -1788,29 +1978,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker = DSREWorker(files, outdir, self.params())
         self.worker.sig_log.connect(self.append_log)
         self.worker.sig_file_progress.connect(self.on_file_progress)
-        self.worker.sig_step_progress.connect(self.on_step_progress)
         self.worker.sig_overall_progress.connect(self.on_overall_progress)
         self.worker.sig_file_done.connect(self.on_file_done)
         self.worker.sig_error.connect(self.on_error)
         self.worker.sig_finished.connect(self.on_finished)
         self.worker.start()
 
-    @QtCore.Slot(int, int, str)
-    def on_file_progress(self, cur, total, fname):
-        self.lbl_now.setText(f"[{cur}/{total}] {fname}")
-        self.pb_file.setValue(0)
-        self.statusBar().showMessage(f"[{cur}/{total}] {fname}")
-
     @QtCore.Slot(int, str)
-    def on_step_progress(self, pct, fname):
-        self.pb_file.setValue(pct)
+    def on_file_progress(self, avg_pct, active_names):
+        self.pb_file.setValue(avg_pct)
+        self.statusBar().showMessage(f"[{self.tr('processing')}] {active_names}")
 
     @QtCore.Slot(int, int)
     def on_overall_progress(self, done, total):
         pct = int(done * 100 / max(1, total))
         self.pb_all.setValue(pct)
-        self.lbl_stats.setText(f"{done}/{total}")
-        self.statusBar().showMessage(f"{done}/{total} ({pct}%)")
+        self.lbl_stats.setText(f"{done} / {total}")
+        self.lbl_now.setText(f"{self.tr('processing')}  {done} / {total}")
 
     @QtCore.Slot(str, str)
     def on_file_done(self, in_path, out_path):
@@ -1839,7 +2023,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker = DSREWorker(self.failed_files, outdir, self.params())
         self.worker.sig_log.connect(self.append_log)
         self.worker.sig_file_progress.connect(self.on_file_progress)
-        self.worker.sig_step_progress.connect(self.on_step_progress)
         self.worker.sig_overall_progress.connect(self.on_overall_progress)
         self.worker.sig_file_done.connect(self.on_file_done)
         self.worker.sig_error.connect(self.on_error)
@@ -1872,6 +2055,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
 
 def main():
+    multiprocessing.freeze_support()
+
     import ctypes
     myappid = "org.fuyuka.dsre"
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
