@@ -56,12 +56,6 @@ This fork was created to maintain the discontinued Ver 3.x. You can view the cha
 
 ※ To run and build this, you'll need ffmpeg.exe and ffprobe.exe, which must be located in the same directory as the .py file.
 
-## TODO
-
-- [ ] Support for Multithreading and Parallel Processing Implementation.
-
-- [ ] Imports a MacOS GUI from [CrossDarkrix/DSRE-Audio-Enhancer](https://github.com/CrossDarkrix/DSRE-Audio-Enhancer).
-
 ## Credits
 - DSRE: https://github.com/x1aoqv/DSRE---Digital-Sound-Resolution-Enhancer
 - DSRE-English (Forked-GUI): https://github.com/Urabewe/DSRE---Digital-Sound-Resolution-Enhancer-English
