@@ -90,7 +90,7 @@ def lossless_headroom(data, drive=0.9, target_peak_db=-0.5):
     data = data * target_peak_linear
     return data
 
-def _apply_tpdf_dither_16bit(data: np.ndarray) -> np.ndarray:
+def tpdf_dither(data: np.ndarray) -> np.ndarray:
     rng = np.random.default_rng()
     full_scale = 32767.0
     dither = (rng.uniform(-0.5, 0.5, size=data.shape) +
@@ -118,7 +118,7 @@ def save_wav24_out(in_path, y_out, sr, out_path, proc_registry=None, fmt="FLAC",
     tmp_wav.close()
 
     if bit_depth == 16:
-        data_16 = _apply_tpdf_dither_16bit(data)
+        data_16 = tpdf_dither(data)
         sf.write(tmp_wav.name, data_16, sr, subtype="PCM_16")
     else:
         sf.write(tmp_wav.name, data, sr, subtype="FLOAT")
@@ -1479,8 +1479,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cb_format.addItems(["FLAC", "ALAC"])
 
         self.cb_bit_depth = QtWidgets.QComboBox()
-        self.cb_bit_depth.addItem("24-bit", userData=24)
-        self.cb_bit_depth.addItem("16-bit (Dither)", userData=16)
+        self.cb_bit_depth.addItem("24-Bit", userData=24)
+        self.cb_bit_depth.addItem("16-Bit", userData=16)
 
         self.cb_lang = QtWidgets.QComboBox()
         self.cb_lang.addItem("English", userData="en")
