@@ -8,7 +8,7 @@ import soundfile as sf
 import tempfile
 import json
 import multiprocessing
-from concurrent.futures import ProcessPoolExecutor, Future
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, Future, as_completed
 
 import numpy as np
 from scipy import signal
@@ -40,6 +40,7 @@ add_ffmpeg_path("ffmpeg.exe")
 
 # ======== Per-process abort event ========
 _abort_event: Optional[multiprocessing.Event] = None
+
 _progress_queue: Optional["multiprocessing.Queue"] = None
 
 def _worker_init(abort_event: multiprocessing.Event,
@@ -89,7 +90,7 @@ def lossless_headroom(data, drive=0.9, target_peak_db=-0.5):
     data = data * target_peak_linear
     return data
 
-def tpdf_dither(data: np.ndarray) -> np.ndarray:
+def _apply_tpdf_dither_16bit(data: np.ndarray) -> np.ndarray:
     rng = np.random.default_rng()
     full_scale = 32767.0
     dither = (rng.uniform(-0.5, 0.5, size=data.shape) +
@@ -117,7 +118,7 @@ def save_wav24_out(in_path, y_out, sr, out_path, proc_registry=None, fmt="FLAC",
     tmp_wav.close()
 
     if bit_depth == 16:
-        data_16 = tpdf_dither(data)
+        data_16 = _apply_tpdf_dither_16bit(data)
         sf.write(tmp_wav.name, data_16, sr, subtype="PCM_16")
     else:
         sf.write(tmp_wav.name, data, sr, subtype="FLOAT")
@@ -504,6 +505,8 @@ def envelope_shaping(d_res: np.ndarray, x: np.ndarray,
 
     return out[0] if is_1d else out
 
+ZANSEI_MLOOP_WORKERS = 6
+
 def zansei_impl(
     x: np.ndarray,
     sr: int,
@@ -529,13 +532,26 @@ def zansei_impl(
     f_dn = freq_shift_mono if (x.ndim == 1) else freq_shift_multi
     d_res = np.zeros_like(x)
 
-    for i in range(m):
-        if abort_cb and abort_cb():
-            break
+    def _one_shift(i: int) -> np.ndarray:
         shift_hz = sr * (i + 1) / (m * 2.0)
-        d_res += f_dn(d_src, shift_hz, d_sr) * np.exp(-(i + 1) * decay)
-        if progress_cb:
-            progress_cb(i + 1, m)
+        return f_dn(d_src, shift_hz, d_sr) * np.exp(-(i + 1) * decay)
+
+    completed = 0
+    with ThreadPoolExecutor(max_workers=ZANSEI_MLOOP_WORKERS) as tpool:
+        futures = {tpool.submit(_one_shift, i): i for i in range(m)}
+        try:
+            for fut in as_completed(futures):
+                if abort_cb and abort_cb():
+                    for f in futures:
+                        f.cancel()
+                    break
+                d_res += fut.result()
+                completed += 1
+                if progress_cb:
+                    progress_cb(completed, m)
+        finally:
+            for f in futures:
+                f.cancel()
 
     # Post-processing HPF
     sos = signal.butter(8, post_hp / (sr / 2), 'highpass', output='sos')
@@ -1124,9 +1140,9 @@ STRINGS = {
 # ======== Per-file Processing ========
 _STEP_WEIGHTS = {
     "load":    5,
-    "stair":  10,
+    "stair":  10,   # bde_time_domain (skipped when bypass)
     "resamp": 30,
-    "detail": 15,
+    "detail": 15,   # bde_spectral_detail_synth (skipped when bypass)
     "zansei": 35,
     "save":    5,
 }
@@ -1283,7 +1299,8 @@ class DSREWorker(QtCore.QThread):
 
         progress_queue: multiprocessing.Queue = multiprocessing.Queue()
 
-        max_workers = min(total, max(1, (os.cpu_count() or 2) - 1))
+        cpu_budget = max(1, (os.cpu_count() or 2) - 1)
+        max_workers = min(total, max(1, cpu_budget // ZANSEI_MLOOP_WORKERS))
 
         with ProcessPoolExecutor(
             max_workers=max_workers,
@@ -1311,7 +1328,7 @@ class DSREWorker(QtCore.QThread):
                 for f in finished:
                     pending.discard(f)
                     try:
-                        f.result()  # re-raises here if an exception occurred
+                        f.result()
                     except Exception as e:
                         err = "".join(traceback.format_exception_only(type(e), e)).strip()
                         self.sig_log.emit(f"[internal error] {err}")
@@ -1433,10 +1450,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.le_outdir.setPlaceholderText(self.tr("output_placeholder"))
         self.le_outdir.setText(os.path.abspath("output"))
 
-        self.cb_bit_depth = QtWidgets.QComboBox()
-        self.cb_bit_depth.addItem("24-Bit", userData=24)
-        self.cb_bit_depth.addItem("16-Bit", userData=16)
-
         self.cb_sr = QtWidgets.QComboBox()
         for sr_val in [44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000]:
             self.cb_sr.addItem(f"{sr_val // 1000} KHz  ({sr_val} Hz)", userData=sr_val)
@@ -1464,6 +1477,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.cb_format = QtWidgets.QComboBox()
         self.cb_format.addItems(["FLAC", "ALAC"])
+
+        self.cb_bit_depth = QtWidgets.QComboBox()
+        self.cb_bit_depth.addItem("24-bit", userData=24)
+        self.cb_bit_depth.addItem("16-bit (Dither)", userData=16)
 
         self.cb_lang = QtWidgets.QComboBox()
         self.cb_lang.addItem("English", userData="en")
@@ -1527,12 +1544,12 @@ class MainWindow(QtWidgets.QMainWindow):
         right_layout.addWidget(self.lbl_params)
 
         form = QtWidgets.QFormLayout()
-        self.lbl_bit_depth = QtWidgets.QLabel(self.tr("bit_depth_label"))
         self.lbl_sr    = QtWidgets.QLabel(self.tr("sr_label"))
         self.lbl_fmt   = QtWidgets.QLabel(self.tr("fmt_label"))
-        form.addRow(self.lbl_bit_depth, self.cb_bit_depth)
+        self.lbl_bit_depth = QtWidgets.QLabel(self.tr("bit_depth_label"))
         form.addRow(self.lbl_sr,    self.cb_sr)
         form.addRow(self.lbl_fmt,   self.cb_format)
+        form.addRow(self.lbl_bit_depth, self.cb_bit_depth)
         right_layout.addLayout(form)
         right_layout.addSpacing(20)
 
