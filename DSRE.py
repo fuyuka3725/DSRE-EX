@@ -1450,6 +1450,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.le_outdir.setPlaceholderText(self.tr("output_placeholder"))
         self.le_outdir.setText(os.path.abspath("output"))
 
+        self.cb_bit_depth = QtWidgets.QComboBox()
+        self.cb_bit_depth.addItem("24-Bit", userData=24)
+        self.cb_bit_depth.addItem("16-Bit", userData=16)
+
         self.cb_sr = QtWidgets.QComboBox()
         for sr_val in [44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000]:
             self.cb_sr.addItem(f"{sr_val // 1000} KHz  ({sr_val} Hz)", userData=sr_val)
@@ -1477,10 +1481,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.cb_format = QtWidgets.QComboBox()
         self.cb_format.addItems(["FLAC", "ALAC"])
-
-        self.cb_bit_depth = QtWidgets.QComboBox()
-        self.cb_bit_depth.addItem("24-Bit", userData=24)
-        self.cb_bit_depth.addItem("16-Bit", userData=16)
 
         self.cb_lang = QtWidgets.QComboBox()
         self.cb_lang.addItem("English", userData="en")
@@ -1544,12 +1544,12 @@ class MainWindow(QtWidgets.QMainWindow):
         right_layout.addWidget(self.lbl_params)
 
         form = QtWidgets.QFormLayout()
+        self.lbl_bit_depth = QtWidgets.QLabel(self.tr("bit_depth_label"))
         self.lbl_sr    = QtWidgets.QLabel(self.tr("sr_label"))
         self.lbl_fmt   = QtWidgets.QLabel(self.tr("fmt_label"))
-        self.lbl_bit_depth = QtWidgets.QLabel(self.tr("bit_depth_label"))
+        form.addRow(self.lbl_bit_depth, self.cb_bit_depth)
         form.addRow(self.lbl_sr,    self.cb_sr)
         form.addRow(self.lbl_fmt,   self.cb_format)
-        form.addRow(self.lbl_bit_depth, self.cb_bit_depth)
         right_layout.addLayout(form)
         right_layout.addSpacing(20)
 
@@ -1651,11 +1651,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_retry.setText(self.tr("retry"))
         self.lbl_now.setText(self.tr("convert"))
         self.btn_dark.setText(
-            self.tr("light_mode") if self.dark_mode else self.tr("dark_mode"))
+        self.tr("light_mode") if self.dark_mode else self.tr("dark_mode"))
         self.lbl_params.setText(self.tr("params"))
+        self.lbl_bit_depth.setText(self.tr("bit_depth_label"))
         self.lbl_sr.setText(self.tr("sr_label"))
         self.lbl_fmt.setText(self.tr("fmt_label"))
-        self.lbl_bit_depth.setText(self.tr("bit_depth_label"))
         self.lbl_lang.setText(self.tr("lang_label"))
         self.lbl_file_prog.setText(self.tr("file_prog"))
         self.lbl_all_prog.setText(self.tr("all_prog"))
