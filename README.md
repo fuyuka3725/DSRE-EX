@@ -1,3 +1,7 @@
+# Plase use DSEE HX — Reverse Engineering & Reimplementation
+https://github.com/x1aoqv/dsee_hx_re
+
+
 # DSRE EX / Reborned Deep Sound Resolution Enhancer
 
 <img width="640" height="380" alt="img" src="https://github.com/user-attachments/assets/66a0b5b3-b361-4bb7-8153-f4f876c19b00" />
